@@ -8,7 +8,7 @@ Human emotion detection SDK for robotics using Vision-Language-Action (VLA) mode
 - **Face detection**: Automatic face detection using MTCNN (RetinaFace planned)
 - **Voice activity detection**: Detect human speech using WebRTC VAD
 - **Facial emotion recognition**: ViT-based classification (`trpakov/vit-face-expression`)
-- **Speech emotion recognition**: Wav2Vec2-based analysis (`ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition`)
+- **Speech emotion recognition**: Wav2Vec2-based analysis (`superb/wav2vec2-base-superb-er`)
 - **Multimodal fusion**: Combine visual and audio signals (average, weighted, max, confidence strategies)
 - **VLA action generation**: OpenVLA-7B for emotion-aware robot actions (swappable via model registry)
 - **Real-time & batch processing**: Streaming from webcam/mic or file-based processing
@@ -69,7 +69,7 @@ Input Sources → Detection Layer → Emotion Analysis → VLA Model → Actions
 | `mode` | `"batch"` | `"batch"` or `"realtime"` |
 | `face_detection_threshold` | `0.9` | Face detection confidence threshold |
 | `facial_emotion_model` | `"trpakov/vit-face-expression"` | Facial emotion model |
-| `speech_emotion_model` | `"ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"` | Speech emotion model |
+| `speech_emotion_model` | `"superb/wav2vec2-base-superb-er"` | Speech emotion model |
 | `fusion_strategy` | `"weighted"` | `"average"`, `"weighted"`, `"max"`, `"confidence"` |
 | `facial_weight` / `speech_weight` | `0.6` / `0.4` | Fusion weights for multimodal |
 | `frame_skip` | `1` | Process every nth frame |
@@ -78,7 +78,17 @@ Input Sources → Detection Layer → Emotion Analysis → VLA Model → Actions
 
 ## Supported Emotions
 
-Happy, Sad, Angry, Fearful, Surprised, Disgusted, Neutral
+| Emotion | Facial | Speech |
+|---------|--------|--------|
+| Happy | ✅ | ✅ |
+| Sad | ✅ | ✅ |
+| Angry | ✅ | ✅ |
+| Neutral | ✅ | ✅ |
+| Fearful | ✅ | ❌ |
+| Surprised | ✅ | ❌ |
+| Disgusted | ✅ | ❌ |
+
+*Speech model (SUPERB) supports 4 emotions; facial model supports all 7.*
 
 ## Custom Action Handlers
 

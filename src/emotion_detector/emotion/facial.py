@@ -74,6 +74,7 @@ class FacialEmotionRecognizer(BaseModel[FaceDetection, FacialEmotionResult]):
         model_id = self.config.model_id
 
         # Load processor and model
+        # Use safetensors format to avoid torch.load security issues
         self._processor = AutoImageProcessor.from_pretrained(
             model_id,
             cache_dir=self.config.cache_dir,
@@ -81,6 +82,7 @@ class FacialEmotionRecognizer(BaseModel[FaceDetection, FacialEmotionResult]):
         self._model = AutoModelForImageClassification.from_pretrained(
             model_id,
             cache_dir=self.config.cache_dir,
+            use_safetensors=True,
         )
 
         # Set device

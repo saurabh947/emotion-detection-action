@@ -4,6 +4,11 @@
 This example demonstrates how to process multiple files and
 generate emotion analysis reports.
 
+Supported file types:
+    - Video: .mp4, .avi, .mov, .mkv, .webm
+    - Image: .jpg, .jpeg, .png, .bmp, .gif
+    - Audio: .wav, .mp3 (speech emotions: happy, sad, angry, neutral)
+
 Usage:
     python batch_processing.py --input-dir ./videos --output-dir ./results
 """

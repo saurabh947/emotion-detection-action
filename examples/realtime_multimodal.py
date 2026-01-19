@@ -4,6 +4,10 @@
 This example shows video (facial) and audio (speech) emotion detection
 SEPARATELY without fusion. Each modality has its own panel.
 
+Supported emotions:
+    - Facial: happy, sad, angry, fearful, surprised, disgusted, neutral (7)
+    - Speech: happy, sad, angry, neutral (4) - using SUPERB model
+
 Requirements:
     - Webcam connected to the system
     - Microphone connected to the system
@@ -96,7 +100,7 @@ class AudioEmotionProcessor:
 
         print("[Audio] Initializing speech emotion recognizer...")
         speech_config = ModelConfig(
-            model_id="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
+            model_id="superb/wav2vec2-base-superb-er",
             device="cpu",
         )
         self._speech_emotion = SpeechEmotionRecognizer(

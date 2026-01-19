@@ -2,7 +2,11 @@
 """Basic usage example for the emotion detector SDK.
 
 This example demonstrates how to use the EmotionDetector for
-processing images and video files.
+processing images and video files with optional audio.
+
+Supported emotions:
+    - Facial (from images/video): happy, sad, angry, fearful, surprised, disgusted, neutral
+    - Speech (from audio): happy, sad, angry, neutral
 """
 
 from pathlib import Path

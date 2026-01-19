@@ -46,7 +46,7 @@ class Config:
 
     # Emotion model settings
     facial_emotion_model: str = "trpakov/vit-face-expression"
-    speech_emotion_model: str = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+    speech_emotion_model: str = "superb/wav2vec2-base-superb-er"
 
     # Fusion settings
     fusion_strategy: Literal["average", "weighted", "max", "learned"] = "weighted"

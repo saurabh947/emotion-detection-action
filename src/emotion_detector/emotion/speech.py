@@ -25,11 +25,14 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
     """Speech emotion recognition using Wav2Vec2-based models.
 
     Uses HuggingFace transformer models for speech emotion recognition.
-    Default model: ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition
+    Default model: superb/wav2vec2-base-superb-er (trained on IEMOCAP dataset)
+    
+    Supported emotions (from speech): happy, sad, angry, neutral
+    Note: Other emotions (fearful, surprised, disgusted) are mapped from facial only.
 
     Example:
         >>> config = ModelConfig(
-        ...     model_id="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
+        ...     model_id="superb/wav2vec2-base-superb-er",
         ...     device="cuda"
         ... )
         >>> recognizer = SpeechEmotionRecognizer(config)
@@ -38,15 +41,13 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
         >>> print(result.emotions.dominant_emotion)
     """
 
-    # Standard emotion label mapping for speech
+    # SUPERB model outputs 4 emotions: neu, hap, ang, sad
+    # We map these to our standard labels
     EMOTION_LABELS = [
-        "angry",
-        "disgusted",
-        "fearful",
-        "happy",
         "neutral",
+        "happy",
+        "angry",
         "sad",
-        "surprised",
     ]
 
     def __init__(
@@ -81,6 +82,7 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
         model_id = self.config.model_id
 
         # Load feature extractor and model
+        # Use safetensors format to avoid torch.load security issues
         self._feature_extractor = AutoFeatureExtractor.from_pretrained(
             model_id,
             cache_dir=self.config.cache_dir,
@@ -88,6 +90,7 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
         self._model = AutoModelForAudioClassification.from_pretrained(
             model_id,
             cache_dir=self.config.cache_dir,
+            use_safetensors=True,
         )
 
         # Set device
@@ -283,6 +286,13 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
     def _map_to_emotions(self, probs: np.ndarray) -> dict[str, float]:
         """Map model output probabilities to standard emotion labels.
 
+        The SUPERB model (superb/wav2vec2-base-superb-er) outputs 4 classes:
+        - neu (neutral), hap (happy), ang (angry), sad (sad)
+        
+        Other emotions (fearful, surprised, disgusted) are set to 0.0 as
+        they are not supported by the speech model and should come from
+        facial emotion recognition via fusion.
+
         Args:
             probs: Probability array from model.
 
@@ -304,23 +314,23 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
                 label = self._label_mapping[idx].lower()
 
                 # Map model labels to standard labels
-                if label in ("happy", "happiness", "ps", "joy"):
-                    emotion_dict["happy"] += prob
+                # SUPERB uses: neu, hap, ang, sad
+                if label in ("happy", "happiness", "hap", "joy"):
+                    emotion_dict["happy"] += float(prob)
                 elif label in ("sad", "sadness"):
-                    emotion_dict["sad"] += prob
-                elif label in ("angry", "anger"):
-                    emotion_dict["angry"] += prob
+                    emotion_dict["sad"] += float(prob)
+                elif label in ("angry", "anger", "ang"):
+                    emotion_dict["angry"] += float(prob)
+                elif label in ("neutral", "neu", "calm"):
+                    emotion_dict["neutral"] += float(prob)
                 elif label in ("fearful", "fear"):
-                    emotion_dict["fearful"] += prob
+                    emotion_dict["fearful"] += float(prob)
                 elif label in ("surprised", "surprise"):
-                    emotion_dict["surprised"] += prob
+                    emotion_dict["surprised"] += float(prob)
                 elif label in ("disgusted", "disgust"):
-                    emotion_dict["disgusted"] += prob
-                elif label in ("neutral", "calm"):
-                    emotion_dict["neutral"] += prob
-                else:
-                    # Unknown label, distribute to neutral
-                    emotion_dict["neutral"] += prob
+                    emotion_dict["disgusted"] += float(prob)
+                # Note: Unknown labels are ignored rather than mapped to neutral
+                # to avoid artificially inflating neutral scores
 
         return emotion_dict
 

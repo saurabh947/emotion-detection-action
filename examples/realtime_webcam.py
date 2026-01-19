@@ -2,15 +2,21 @@
 """Real-time webcam emotion detection example.
 
 This example demonstrates how to use the EmotionDetector for
-real-time emotion detection from a webcam feed.
+real-time emotion detection from a webcam feed with optional audio.
+
+Supported emotions:
+    - Facial: happy, sad, angry, fearful, surprised, disgusted, neutral (7)
+    - Speech (with --audio): happy, sad, angry, neutral (4)
 
 Requirements:
     - Webcam connected to the system
     - OpenCV for visualization
+    - Microphone (optional, for --audio flag)
 
 Usage:
     python realtime_webcam.py
     python realtime_webcam.py --camera 1  # Use different camera
+    python realtime_webcam.py --audio     # Enable audio emotion detection
     python realtime_webcam.py --no-display  # Run without visualization
 """
 
