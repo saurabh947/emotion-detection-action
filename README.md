@@ -78,7 +78,7 @@ Real-time Input → Detection Layer → Emotion Analysis → VLA Model → Actio
 | `vla_model` | `"openvla/openvla-7b"` | VLA model for action generation |
 | `vla_enabled` | `True` | Set `False` for emotion-only mode |
 | `device` | `"cuda"` | `"cuda"`, `"cpu"`, or `"mps"` |
-| `face_detection_model` | `"mtcnn"` | Face detector: `"mtcnn"` or `"retinaface"` |
+| `face_detection_model` | `"retinaface"` | Face detector: `"mtcnn"` or `"retinaface"` |
 | `face_detection_threshold` | `0.9` | Face detection confidence threshold |
 | `facial_emotion_model` | `"trpakov/vit-face-expression"` | Facial emotion model (HuggingFace) |
 | `speech_emotion_model` | `"superb/wav2vec2-base-superb-er"` | Speech emotion model (HuggingFace) |
@@ -96,10 +96,10 @@ Real-time Input → Detection Layer → Emotion Analysis → VLA Model → Actio
 | `retinaface` | Slower | Better | Challenging poses, small/occluded faces |
 
 ```python
-# Use RetinaFace for better accuracy
+# Use RetinaFace for better accuracy (default)
 config = Config(face_detection_model="retinaface")
 
-# Use MTCNN for faster real-time processing (default)
+# Use MTCNN for faster real-time processing
 config = Config(face_detection_model="mtcnn")
 ```
 
