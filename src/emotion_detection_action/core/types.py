@@ -74,6 +74,7 @@ class DetectionResult:
     timestamp: float
     faces: list[FaceDetection] = field(default_factory=list)
     voice: VoiceDetection | None = None
+    gaze: GazeDetection | None = None
     frame: np.ndarray | None = None  # Original frame if available
 
 
@@ -123,6 +124,100 @@ class EmotionScores:
 
 
 @dataclass
+class EyeDetection:
+    """Result of eye/gaze detection for a single eye."""
+
+    center: tuple[float, float]  # (x, y) center of eye
+    landmarks: np.ndarray | None = None  # Eye landmarks if available
+    pupil_size: float = 0.0  # Estimated pupil size (normalized)
+    openness: float = 1.0  # Eye openness ratio (0=closed, 1=fully open)
+
+
+@dataclass
+class GazeDetection:
+    """Result of gaze detection."""
+
+    left_eye: EyeDetection | None = None
+    right_eye: EyeDetection | None = None
+    gaze_direction: tuple[float, float] = (0.0, 0.0)  # (x, y) normalized gaze vector
+    gaze_point: tuple[float, float] | None = None  # Where user is looking on screen
+    confidence: float = 0.0
+
+    @property
+    def avg_pupil_size(self) -> float:
+        """Average pupil size from both eyes."""
+        sizes = []
+        if self.left_eye:
+            sizes.append(self.left_eye.pupil_size)
+        if self.right_eye:
+            sizes.append(self.right_eye.pupil_size)
+        return sum(sizes) / len(sizes) if sizes else 0.0
+
+    @property
+    def avg_eye_openness(self) -> float:
+        """Average eye openness from both eyes."""
+        openness = []
+        if self.left_eye:
+            openness.append(self.left_eye.openness)
+        if self.right_eye:
+            openness.append(self.right_eye.openness)
+        return sum(openness) / len(openness) if openness else 1.0
+
+
+@dataclass
+class AttentionMetrics:
+    """Metrics derived from attention analysis."""
+
+    # Raw measurements
+    pupil_dilation: float = 0.0  # Change from baseline (positive = dilated)
+    gaze_stability: float = 1.0  # How stable the gaze is (0=unstable, 1=stable)
+    blink_rate: float = 0.0  # Blinks per minute
+    eye_contact_ratio: float = 0.0  # Ratio of time looking at camera
+
+    # Derived scores (0-1, higher = more intense)
+    stress_score: float = 0.0  # Based on pupil dilation + blink rate
+    engagement_score: float = 0.0  # Based on eye contact + fixation
+    nervousness_score: float = 0.0  # Based on gaze aversion + instability
+
+    def to_dict(self) -> dict[str, float]:
+        """Convert to dictionary."""
+        return {
+            "pupil_dilation": self.pupil_dilation,
+            "gaze_stability": self.gaze_stability,
+            "blink_rate": self.blink_rate,
+            "eye_contact_ratio": self.eye_contact_ratio,
+            "stress_score": self.stress_score,
+            "engagement_score": self.engagement_score,
+            "nervousness_score": self.nervousness_score,
+        }
+
+
+@dataclass
+class AttentionResult:
+    """Result of attention analysis."""
+
+    timestamp: float
+    gaze: GazeDetection | None = None
+    metrics: AttentionMetrics = field(default_factory=AttentionMetrics)
+    confidence: float = 0.0
+
+    @property
+    def stress_score(self) -> float:
+        """Shortcut to stress score."""
+        return self.metrics.stress_score
+
+    @property
+    def engagement_score(self) -> float:
+        """Shortcut to engagement score."""
+        return self.metrics.engagement_score
+
+    @property
+    def nervousness_score(self) -> float:
+        """Shortcut to nervousness score."""
+        return self.metrics.nervousness_score
+
+
+@dataclass
 class FacialEmotionResult:
     """Result of facial emotion recognition."""
 
@@ -148,12 +243,18 @@ class EmotionResult:
     emotions: EmotionScores
     facial_result: FacialEmotionResult | None = None
     speech_result: SpeechEmotionResult | None = None
+    attention_result: AttentionResult | None = None
     fusion_confidence: float = 0.0
 
     @property
     def dominant_emotion(self) -> EmotionLabel:
         """Get the dominant emotion."""
         return self.emotions.dominant_emotion
+
+    @property
+    def attention(self) -> AttentionResult | None:
+        """Shortcut to attention result."""
+        return self.attention_result
 
 
 @dataclass

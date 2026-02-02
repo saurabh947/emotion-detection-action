@@ -3,6 +3,8 @@
 import pytest
 
 from emotion_detection_action.core.types import (
+    AttentionMetrics,
+    AttentionResult,
     BoundingBox,
     EmotionLabel,
     EmotionScores,
@@ -84,7 +86,7 @@ class TestEmotionFusion:
     def test_fuse_no_results_raises(self):
         """Test that fusion with no results raises error."""
         fusion = EmotionFusion()
-        with pytest.raises(ValueError, match="At least one emotion result must be provided"):
+        with pytest.raises(ValueError, match="No emotion results pass confidence threshold"):
             fusion.fuse(facial_result=None, speech_result=None)
 
     def test_fuse_average_strategy(self):
@@ -233,4 +235,143 @@ class TestFusionEdgeCases:
         assert result is not None
         # Dominant emotion will be one of them (likely first alphabetically)
         assert result.dominant_emotion is not None
+
+
+def create_attention_result(
+    stress: float = 0.0,
+    engagement: float = 0.5,
+    nervousness: float = 0.0,
+    confidence: float = 0.9,
+) -> AttentionResult:
+    """Helper to create attention result."""
+    metrics = AttentionMetrics(
+        stress_score=stress,
+        engagement_score=engagement,
+        nervousness_score=nervousness,
+    )
+    return AttentionResult(timestamp=0.0, metrics=metrics, confidence=confidence)
+
+
+class TestAttentionModulatedFusion:
+    """Tests for attention-modulated emotion fusion."""
+
+    def test_fusion_with_attention_init(self):
+        """Test fusion initialization with attention parameters."""
+        fusion = EmotionFusion(
+            attention_weight=0.3,
+            attention_stress_amplification=2.0,
+            attention_engagement_threshold=0.4,
+        )
+        assert fusion.attention_weight == 0.3
+        assert fusion.attention_stress_amplification == 2.0
+        assert fusion.attention_engagement_threshold == 0.4
+
+    def test_fuse_with_attention_result(self):
+        """Test fusion includes attention result."""
+        fusion = EmotionFusion()
+        facial = create_facial_result(happy=0.8)
+        attention = create_attention_result(stress=0.3, engagement=0.8)
+
+        result = fusion.fuse(
+            facial_result=facial,
+            speech_result=None,
+            attention_result=attention,
+        )
+
+        assert result.attention_result is not None
+        assert result.attention_result.stress_score == 0.3
+        assert result.attention_result.engagement_score == 0.8
+
+    def test_stress_amplifies_negative_emotions(self):
+        """Test that high stress amplifies negative emotions."""
+        fusion = EmotionFusion(attention_weight=0.3, attention_stress_amplification=1.5)
+
+        facial = create_facial_result(sad=0.5, happy=0.5)
+
+        # No stress
+        no_stress_attn = create_attention_result(stress=0.0, engagement=0.8)
+        result_no_stress = fusion.fuse(facial, None, no_stress_attn)
+
+        # High stress
+        high_stress_attn = create_attention_result(stress=0.8, engagement=0.8)
+        result_high_stress = fusion.fuse(facial, None, high_stress_attn)
+
+        # High stress should amplify sad relative to happy
+        no_stress_ratio = result_no_stress.emotions.sad / max(result_no_stress.emotions.happy, 0.01)
+        high_stress_ratio = result_high_stress.emotions.sad / max(result_high_stress.emotions.happy, 0.01)
+
+        assert high_stress_ratio > no_stress_ratio
+
+    def test_low_engagement_reduces_confidence(self):
+        """Test that low engagement reduces fusion confidence."""
+        fusion = EmotionFusion(
+            attention_weight=0.3,
+            attention_engagement_threshold=0.5,
+        )
+
+        facial = create_facial_result(happy=0.8, confidence=0.9)
+
+        # High engagement
+        high_eng_attn = create_attention_result(engagement=0.8)
+        result_high_eng = fusion.fuse(facial, None, high_eng_attn)
+
+        # Low engagement
+        low_eng_attn = create_attention_result(engagement=0.2)
+        result_low_eng = fusion.fuse(facial, None, low_eng_attn)
+
+        # Low engagement should reduce confidence
+        assert result_low_eng.fusion_confidence < result_high_eng.fusion_confidence
+
+    def test_nervousness_boosts_fearful(self):
+        """Test that nervousness boosts fearful emotion."""
+        fusion = EmotionFusion(attention_weight=0.3)
+
+        # Create facial result with some fearful
+        bbox = BoundingBox(x=0, y=0, width=100, height=100)
+        face = FaceDetection(bbox=bbox, confidence=0.95)
+        scores = EmotionScores(fearful=0.3, neutral=0.7)
+        facial = FacialEmotionResult(face_detection=face, emotions=scores, confidence=0.9)
+
+        # No nervousness
+        no_nerv_attn = create_attention_result(nervousness=0.0, engagement=0.8)
+        result_no_nerv = fusion.fuse(facial, None, no_nerv_attn)
+
+        # High nervousness
+        high_nerv_attn = create_attention_result(nervousness=0.8, engagement=0.8)
+        result_high_nerv = fusion.fuse(facial, None, high_nerv_attn)
+
+        # Nervousness should boost fearful
+        assert result_high_nerv.emotions.fearful > result_no_nerv.emotions.fearful
+
+    def test_attention_with_zero_confidence_ignored(self):
+        """Test that attention with zero confidence is ignored."""
+        fusion = EmotionFusion(attention_weight=0.3)
+
+        facial = create_facial_result(happy=0.8)
+
+        # Attention with zero confidence
+        zero_conf_attn = create_attention_result(stress=0.9, confidence=0.0)
+
+        # Fusion without attention
+        result_no_attn = fusion.fuse(facial, None, None)
+
+        # Fusion with zero-confidence attention
+        result_zero_conf = fusion.fuse(facial, None, zero_conf_attn)
+
+        # Should be identical since zero confidence attention is ignored
+        assert result_no_attn.emotions.happy == result_zero_conf.emotions.happy
+
+    def test_attention_preserves_in_result(self):
+        """Test that attention result is preserved in output."""
+        fusion = EmotionFusion()
+        facial = create_facial_result(neutral=0.9)
+        attention = create_attention_result(stress=0.5, engagement=0.7, nervousness=0.3)
+
+        result = fusion.fuse(facial, None, attention)
+
+        # Original attention should be accessible
+        assert result.attention is not None
+        assert result.attention.stress_score == 0.5
+        assert result.attention.engagement_score == 0.7
+        assert result.attention.nervousness_score == 0.3
 

@@ -4,9 +4,12 @@ from emotion_detection_action.core.config import Config
 from emotion_detection_action.core.detector import EmotionDetector
 from emotion_detection_action.core.types import (
     ActionCommand,
+    AttentionMetrics,
+    AttentionResult,
     DetectionResult,
     EmotionResult,
     FaceDetection,
+    GazeDetection,
     VoiceDetection,
 )
 
@@ -18,5 +21,8 @@ __all__ = [
     "ActionCommand",
     "FaceDetection",
     "VoiceDetection",
+    "GazeDetection",
+    "AttentionResult",
+    "AttentionMetrics",
 ]
 

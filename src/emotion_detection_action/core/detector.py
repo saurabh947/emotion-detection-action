@@ -10,12 +10,15 @@ from emotion_detection_action.actions.logging_handler import LoggingActionHandle
 from emotion_detection_action.core.config import Config, ModelConfig
 from emotion_detection_action.core.types import (
     ActionCommand,
+    AttentionResult,
     DetectionResult,
     EmotionResult,
     PipelineResult,
 )
+from emotion_detection_action.detection.attention import AttentionDetector
 from emotion_detection_action.detection.face import FaceDetector
 from emotion_detection_action.detection.voice import VoiceActivityDetector
+from emotion_detection_action.emotion.attention import AttentionAnalyzer
 from emotion_detection_action.emotion.facial import FacialEmotionRecognizer
 from emotion_detection_action.emotion.fusion import EmotionFusion
 from emotion_detection_action.emotion.smoothing import EmotionSmoother, SmoothingConfig
@@ -33,6 +36,7 @@ class EmotionDetector:
     This class integrates all components of the emotion detection system:
     - Face detection
     - Voice activity detection
+    - Attention analysis (gaze, pupil dilation, fixation)
     - Facial emotion recognition
     - Speech emotion recognition
     - Multimodal fusion
@@ -48,6 +52,8 @@ class EmotionDetector:
         >>> # Real-time streaming from webcam + microphone
         >>> async for result in detector.stream(camera=0, microphone=0):
         ...     print(result.emotion.dominant_emotion)
+        ...     if result.emotion.attention:
+        ...         print(f"Stress: {result.emotion.attention.stress_score:.2f}")
 
         >>> # Process a single frame (for custom real-time pipelines)
         >>> result = detector.process_frame(frame, audio, timestamp=0.0)
@@ -71,6 +77,8 @@ class EmotionDetector:
         # Components (initialized lazily)
         self._face_detector: FaceDetector | None = None
         self._voice_detector: VoiceActivityDetector | None = None
+        self._attention_detector: AttentionDetector | None = None
+        self._attention_analyzer: AttentionAnalyzer | None = None
         self._facial_emotion: FacialEmotionRecognizer | None = None
         self._speech_emotion: SpeechEmotionRecognizer | None = None
         self._fusion: EmotionFusion | None = None
@@ -115,6 +123,20 @@ class EmotionDetector:
         )
         self._voice_detector.load()
 
+        # Initialize attention detector (if enabled)
+        if self.config.attention_analysis_enabled:
+            try:
+                attention_config = ModelConfig(model_id="mediapipe", device="cpu")
+                self._attention_detector = AttentionDetector(attention_config)
+                self._attention_detector.load()
+                self._attention_analyzer = AttentionAnalyzer(detector=self._attention_detector)
+            except RuntimeError as e:
+                # MediaPipe not available, disable attention analysis
+                if self.config.verbose:
+                    print(f"Attention analysis disabled: {e}")
+                self._attention_detector = None
+                self._attention_analyzer = None
+
         # Initialize facial emotion recognizer
         facial_config = self.config.get_facial_emotion_config()
         self._facial_emotion = FacialEmotionRecognizer(facial_config)
@@ -134,6 +156,9 @@ class EmotionDetector:
             visual_weight=self.config.facial_weight,
             audio_weight=self.config.speech_weight,
             confidence_threshold=self.config.fusion_confidence_threshold,
+            attention_weight=self.config.attention_weight,
+            attention_stress_amplification=self.config.attention_stress_amplification,
+            attention_engagement_threshold=self.config.attention_engagement_threshold,
         )
 
         # Initialize temporal smoother
@@ -163,6 +188,8 @@ class EmotionDetector:
             self._face_detector.unload()
         if self._voice_detector:
             self._voice_detector.unload()
+        if self._attention_detector:
+            self._attention_detector.unload()
         if self._facial_emotion:
             self._facial_emotion.unload()
         if self._speech_emotion:
@@ -281,11 +308,32 @@ class EmotionDetector:
         if audio_chunk and self._voice_detector:
             voice_detection = self._voice_detector.predict(audio_chunk)
 
+        # Process attention/gaze analysis
+        gaze_detection = None
+        attention_result: AttentionResult | None = None
+        if self._attention_detector and self._attention_analyzer:
+            gaze_detection = self._attention_detector.predict(rgb_frame)
+            if gaze_detection:
+                # Get metrics from detector
+                blink_rate = self._attention_detector.get_blink_rate()
+                pupil_dilation = self._attention_detector.get_pupil_dilation()
+                gaze_stability = self._attention_detector.get_gaze_stability()
+
+                # Analyze attention
+                attention_result = self._attention_analyzer.analyze(
+                    gaze=gaze_detection,
+                    blink_rate=blink_rate,
+                    pupil_dilation=pupil_dilation,
+                    gaze_stability=gaze_stability,
+                    timestamp=timestamp,
+                )
+
         # Create detection result
         detection = DetectionResult(
             timestamp=timestamp,
             faces=faces,
             voice=voice_detection,
+            gaze=gaze_detection,
             frame=frame.data,
         )
 
@@ -300,11 +348,13 @@ class EmotionDetector:
         if voice_detection and voice_detection.is_speech and self._speech_emotion:
             speech_result = self._speech_emotion.predict(voice_detection)
 
-        # Fuse emotions
+        # Fuse emotions (including attention analysis)
         if facial_result is None and speech_result is None:
             return None
 
-        emotion_result = self._fusion.fuse(facial_result, speech_result, timestamp)
+        emotion_result = self._fusion.fuse(
+            facial_result, speech_result, attention_result, timestamp
+        )
 
         # Apply temporal smoothing
         if self._smoother is not None:

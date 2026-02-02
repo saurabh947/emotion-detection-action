@@ -5,6 +5,7 @@ from typing import Literal
 import numpy as np
 
 from emotion_detection_action.core.types import (
+    AttentionResult,
     EmotionResult,
     EmotionScores,
     FacialEmotionResult,
@@ -13,14 +14,19 @@ from emotion_detection_action.core.types import (
 
 
 class EmotionFusion:
-    """Fuses facial and speech emotion recognition results.
+    """Fuses facial, speech, and attention analysis results.
 
-    Combines emotion predictions from multiple modalities (visual and audio)
-    into a unified emotion result using various fusion strategies.
+    Combines emotion predictions from multiple modalities (visual, audio, and
+    attention) into a unified emotion result using various fusion strategies.
+
+    Attention analysis affects the fusion by:
+    - High stress amplifies negative emotions (sad, angry, fearful)
+    - Low engagement reduces overall confidence
+    - High nervousness increases fearful/anxious signals
 
     Example:
         >>> fusion = EmotionFusion(strategy="confidence", confidence_threshold=0.3)
-        >>> result = fusion.fuse(facial_result, speech_result, timestamp=1.5)
+        >>> result = fusion.fuse(facial_result, speech_result, attention_result, timestamp=1.5)
         >>> print(result.emotions.dominant_emotion)
     """
 
@@ -30,6 +36,9 @@ class EmotionFusion:
         visual_weight: float = 0.6,
         audio_weight: float = 0.4,
         confidence_threshold: float = 0.3,
+        attention_weight: float = 0.2,
+        attention_stress_amplification: float = 1.5,
+        attention_engagement_threshold: float = 0.3,
     ) -> None:
         """Initialize the fusion module.
 
@@ -43,11 +52,17 @@ class EmotionFusion:
             audio_weight: Weight for audio (speech) emotions (0-1).
             confidence_threshold: Minimum confidence to include a modality in fusion.
                 Results below this threshold are ignored. Set to 0 to disable.
+            attention_weight: How much attention affects the final result (0-1).
+            attention_stress_amplification: Factor to amplify negative emotions under stress.
+            attention_engagement_threshold: Below this engagement, reduce confidence.
         """
         self.strategy = strategy
         self.visual_weight = visual_weight
         self.audio_weight = audio_weight
         self.confidence_threshold = confidence_threshold
+        self.attention_weight = attention_weight
+        self.attention_stress_amplification = attention_stress_amplification
+        self.attention_engagement_threshold = attention_engagement_threshold
 
         # Normalize weights
         total = visual_weight + audio_weight
@@ -59,6 +74,7 @@ class EmotionFusion:
         self,
         facial_result: FacialEmotionResult | None = None,
         speech_result: SpeechEmotionResult | None = None,
+        attention_result: AttentionResult | None = None,
         timestamp: float = 0.0,
     ) -> EmotionResult:
         """Fuse emotion results from multiple modalities.
@@ -66,9 +82,15 @@ class EmotionFusion:
         Applies confidence thresholding: results with confidence below
         the threshold are treated as if they don't exist.
 
+        Attention analysis modifies the final result by:
+        - Amplifying negative emotions when stress is detected
+        - Reducing confidence when engagement is low
+        - Adding nervousness signals to fearful emotions
+
         Args:
             facial_result: Facial emotion recognition result.
             speech_result: Speech emotion recognition result.
+            attention_result: Attention analysis result (optional).
             timestamp: Timestamp for the fused result.
 
         Returns:
@@ -100,49 +122,119 @@ class EmotionFusion:
 
         # Single modality cases (after thresholding)
         if facial_to_use is None and speech_to_use is not None:
-            return EmotionResult(
-                timestamp=timestamp,
-                emotions=speech_to_use.emotions,
-                facial_result=facial_result,  # Keep original for reference
-                speech_result=speech_to_use,
-                fusion_confidence=speech_to_use.confidence,
-            )
-
-        if speech_to_use is None and facial_to_use is not None:
-            return EmotionResult(
-                timestamp=timestamp,
-                emotions=facial_to_use.emotions,
-                facial_result=facial_to_use,
-                speech_result=speech_result,  # Keep original for reference
-                fusion_confidence=facial_to_use.confidence,
-            )
-
-        # Both modalities available and pass threshold - fuse them
-        assert facial_to_use is not None and speech_to_use is not None
-
-        if self.strategy == "average":
-            fused_emotions = self._fuse_average(facial_to_use, speech_to_use)
-        elif self.strategy == "weighted":
-            fused_emotions = self._fuse_weighted(facial_to_use, speech_to_use)
-        elif self.strategy == "max":
-            fused_emotions = self._fuse_max(facial_to_use, speech_to_use)
-        elif self.strategy == "confidence":
-            fused_emotions = self._fuse_confidence(facial_to_use, speech_to_use)
+            emotions = speech_to_use.emotions
+            base_confidence = speech_to_use.confidence
+        elif speech_to_use is None and facial_to_use is not None:
+            emotions = facial_to_use.emotions
+            base_confidence = facial_to_use.confidence
         else:
-            fused_emotions = self._fuse_weighted(facial_to_use, speech_to_use)
+            # Both modalities available and pass threshold - fuse them
+            assert facial_to_use is not None and speech_to_use is not None
 
-        # Calculate fusion confidence
-        fusion_confidence = self._calculate_fusion_confidence(
-            facial_to_use, speech_to_use
-        )
+            if self.strategy == "average":
+                emotions = self._fuse_average(facial_to_use, speech_to_use)
+            elif self.strategy == "weighted":
+                emotions = self._fuse_weighted(facial_to_use, speech_to_use)
+            elif self.strategy == "max":
+                emotions = self._fuse_max(facial_to_use, speech_to_use)
+            elif self.strategy == "confidence":
+                emotions = self._fuse_confidence(facial_to_use, speech_to_use)
+            else:
+                emotions = self._fuse_weighted(facial_to_use, speech_to_use)
+
+            # Calculate fusion confidence
+            base_confidence = self._calculate_fusion_confidence(
+                facial_to_use, speech_to_use
+            )
+
+        # Apply attention-based modifications
+        if attention_result is not None and attention_result.confidence > 0:
+            emotions = self._apply_attention_modulation(emotions, attention_result)
+            base_confidence = self._apply_engagement_adjustment(
+                base_confidence, attention_result
+            )
 
         return EmotionResult(
             timestamp=timestamp,
-            emotions=fused_emotions,
-            facial_result=facial_to_use,
-            speech_result=speech_to_use,
-            fusion_confidence=fusion_confidence,
+            emotions=emotions,
+            facial_result=facial_to_use if facial_valid else facial_result,
+            speech_result=speech_to_use if speech_valid else speech_result,
+            attention_result=attention_result,
+            fusion_confidence=base_confidence,
         )
+
+    def _apply_attention_modulation(
+        self,
+        emotions: EmotionScores,
+        attention: AttentionResult,
+    ) -> EmotionScores:
+        """Apply attention-based modulation to emotion scores.
+
+        High stress amplifies negative emotions.
+        High nervousness increases fearful signals.
+
+        Args:
+            emotions: Base emotion scores.
+            attention: Attention analysis result.
+
+        Returns:
+            Modulated emotion scores.
+        """
+        scores = emotions.to_dict()
+        stress = attention.metrics.stress_score
+        nervousness = attention.metrics.nervousness_score
+
+        # Negative emotions to amplify under stress
+        negative_emotions = ["sad", "angry", "fearful", "disgusted"]
+
+        # Apply stress amplification to negative emotions
+        if stress > 0.3:  # Only apply if stress is notable
+            amplification = 1.0 + (stress * (self.attention_stress_amplification - 1.0))
+            amplification *= self.attention_weight  # Scale by attention weight
+
+            for emotion in negative_emotions:
+                if emotion in scores:
+                    scores[emotion] = min(1.0, scores[emotion] * (1.0 + (amplification - 1.0) * 0.5))
+
+            # Slightly reduce positive emotions under stress
+            scores["happy"] = scores["happy"] * (1.0 - stress * self.attention_weight * 0.3)
+
+        # Nervousness specifically boosts fearful
+        if nervousness > 0.4:
+            boost = nervousness * self.attention_weight * 0.3
+            scores["fearful"] = min(1.0, scores["fearful"] + boost)
+
+        # Normalize scores to sum to 1
+        total = sum(scores.values())
+        if total > 0:
+            scores = {k: v / total for k, v in scores.items()}
+
+        return EmotionScores.from_dict(scores)
+
+    def _apply_engagement_adjustment(
+        self,
+        confidence: float,
+        attention: AttentionResult,
+    ) -> float:
+        """Adjust confidence based on engagement level.
+
+        Low engagement reduces confidence in the emotion reading.
+
+        Args:
+            confidence: Base confidence score.
+            attention: Attention analysis result.
+
+        Returns:
+            Adjusted confidence score.
+        """
+        engagement = attention.metrics.engagement_score
+
+        if engagement < self.attention_engagement_threshold:
+            # Reduce confidence when user isn't engaged
+            penalty = (self.attention_engagement_threshold - engagement) * self.attention_weight
+            confidence = confidence * (1.0 - penalty)
+
+        return max(0.0, min(1.0, confidence))
 
     def _fuse_average(
         self,

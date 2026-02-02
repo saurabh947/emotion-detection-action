@@ -56,6 +56,12 @@ class Config:
     smoothing_hysteresis_threshold: float = 0.15  # Min confidence difference to change
     smoothing_hysteresis_frames: int = 3  # Frames emotion must persist
 
+    # Attention analysis settings
+    attention_analysis_enabled: bool = True  # Enable attention/gaze analysis
+    attention_weight: float = 0.2  # How much attention affects emotion fusion (0-1)
+    attention_stress_amplification: float = 1.5  # How much stress amplifies negative emotions
+    attention_engagement_threshold: float = 0.3  # Below this, reduce confidence
+
     # Performance settings
     batch_size: int = 1
     max_faces: int = 5  # Maximum faces to process per frame

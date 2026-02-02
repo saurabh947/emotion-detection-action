@@ -23,9 +23,10 @@ Press **ESC** or **Q** to quit the demo.
 - **Real-time emotion detection**: Live webcam + microphone processing
 - **Face detection**: Automatic face detection using MTCNN or RetinaFace (configurable)
 - **Voice activity detection**: Detect human speech using WebRTC VAD
+- **Attention analysis**: Eye tracking, gaze detection, pupil dilation, and stress/engagement metrics
 - **Facial emotion recognition**: ViT-based classification (`trpakov/vit-face-expression`)
 - **Speech emotion recognition**: Wav2Vec2-based analysis (`superb/wav2vec2-base-superb-er`)
-- **Multimodal fusion**: Combine visual and audio signals (average, weighted, max, confidence strategies)
+- **Multimodal fusion**: Combine visual, audio, and attention signals with attention-based modulation
 - **Temporal smoothing**: Reduce flickering with rolling average, EMA, or hysteresis smoothing
 - **VLA action generation**: OpenVLA-7B for emotion-aware robot actions (swappable via model registry)
 - **Built-in action handlers**: HTTP, WebSocket, Serial/Arduino, ROS1/ROS2 integration
@@ -91,12 +92,19 @@ emotion = detector.get_emotion_only(frame, audio=None)
 ## Architecture
 
 ```
-Real-time Input → Detection Layer → Emotion Analysis → VLA Model → Actions
-      │                 │                  │               │           │
-   Camera          FaceDetector     FacialEmotion     OpenVLA    ActionHandler
-   Microphone      VoiceActivity    SpeechEmotion                (extensible)
-                   Detector         EmotionFusion
+Real-time Input → Detection Layer → Analysis Layer → Fusion → VLA Model → Actions
+      │                 │                  │            │          │           │
+   Camera          FaceDetector     FacialEmotion   Emotion     OpenVLA    ActionHandler
+   Microphone      VoiceActivity    SpeechEmotion   Fusion                 (extensible)
+                   AttentionDet.    AttentionMetrics
 ```
+
+The SDK processes webcam and microphone input through three analysis pipelines:
+1. **Facial**: Face detection → Emotion recognition (7 emotions)
+2. **Audio**: Voice activity detection → Speech emotion (4 emotions)
+3. **Attention**: Eye tracking → Stress/engagement/nervousness metrics
+
+These are fused together, with attention metrics modulating the final emotion output.
 
 ## Configuration
 
@@ -162,6 +170,43 @@ config = Config(
     smoothing_hysteresis_threshold=0.2,
     smoothing_hysteresis_frames=5,
 )
+```
+
+### Attention Analysis
+
+The SDK includes attention analysis using MediaPipe Face Mesh to track eye movements, pupil size, and gaze patterns. This provides additional psychological indicators that modulate the emotion output.
+
+| Metric | Description | Range |
+|--------|-------------|-------|
+| `stress_score` | Based on pupil dilation and blink rate | 0-1 |
+| `engagement_score` | Based on eye contact and fixation stability | 0-1 |
+| `nervousness_score` | Based on gaze aversion and instability | 0-1 |
+| `blink_rate` | Blinks per minute | 0-60+ |
+| `gaze_direction` | Where user is looking (x, y) | -1 to 1 |
+
+**How attention affects fusion:**
+- High stress → Amplifies negative emotions (sad, angry, fearful)
+- Low engagement → Reduces confidence in emotion reading
+- High nervousness → Increases fearful/anxious signals
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `attention_analysis_enabled` | `True` | Enable attention tracking |
+| `attention_weight` | `0.2` | How much attention affects fusion (0-1) |
+| `attention_stress_amplification` | `1.5` | Factor to amplify negative emotions under stress |
+| `attention_engagement_threshold` | `0.3` | Below this engagement, reduce confidence |
+
+```python
+# Access attention metrics from result
+async for result in detector.stream(camera=0, microphone=0):
+    if result.emotion.attention:
+        attn = result.emotion.attention
+        print(f"Stress: {attn.stress_score:.0%}")
+        print(f"Engagement: {attn.engagement_score:.0%}")
+        print(f"Nervousness: {attn.nervousness_score:.0%}")
+
+# Disable attention analysis
+config = Config(attention_analysis_enabled=False)
 ```
 
 ## Supported Emotions
@@ -242,7 +287,7 @@ detector = EmotionDetector(config, action_handler=MyRobotHandler())
 
 ## Public API
 
-**Main exports**: `EmotionDetector`, `Config`, `EmotionResult`, `DetectionResult`, `ActionCommand`, `FaceDetection`, `VoiceDetection`
+**Main exports**: `EmotionDetector`, `Config`, `EmotionResult`, `DetectionResult`, `ActionCommand`, `FaceDetection`, `VoiceDetection`, `GazeDetection`, `AttentionResult`, `AttentionMetrics`
 
 ## Examples
 
@@ -256,9 +301,14 @@ python examples/realtime_multimodal.py
 python examples/realtime_multimodal.py --camera 1              # Different camera
 python examples/realtime_multimodal.py --smoothing ema         # Smoother output
 python examples/realtime_multimodal.py --face-detection mtcnn  # Faster face detection
+python examples/realtime_multimodal.py --no-attention          # Disable attention tracking
 ```
 
-The demo shows 3 panels: **Facial emotion**, **Audio emotion**, and **Fused result**.
+The demo shows 4 panels:
+- **FACIAL** (top-left): Face emotion detection with 7 emotions
+- **AUDIO** (top-right): Speech emotion detection with 4 emotions
+- **ATTENTION** (bottom-left): Stress, engagement, nervousness metrics
+- **FUSED** (bottom-center): Combined emotion result with attention influence
 
 ### Robot Handlers Demo
 
@@ -278,7 +328,7 @@ black src tests && ruff check src tests --fix
 
 ## Requirements
 
-- Python 3.10+, PyTorch 2.0+, OpenCV, HuggingFace Transformers
+- Python 3.10+, PyTorch 2.0+, OpenCV, HuggingFace Transformers, MediaPipe
 - VLA: CUDA GPU (~16GB VRAM, 8-bit quantization available)
 
 ## License
