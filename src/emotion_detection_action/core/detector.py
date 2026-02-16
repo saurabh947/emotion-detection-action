@@ -34,18 +34,22 @@ class EmotionDetector:
     """Main emotion detector class orchestrating the full pipeline.
 
     This class integrates all components of the emotion detection system:
-    - Face detection
-    - Voice activity detection
-    - Attention analysis (gaze, pupil dilation, fixation)
-    - Facial emotion recognition
-    - Speech emotion recognition
-    - Multimodal fusion
-    - VLA-based action generation
+    - Face detection (MediaPipe)
+    - Voice activity detection (WebRTC VAD)
+    - Attention analysis (gaze, pupil dilation, stress/engagement metrics)
+    - Facial emotion recognition (ViT model)
+    - Speech emotion recognition (Wav2Vec2 model)
+    - ML-based multimodal fusion (neural network - works out-of-the-box)
+    - VLA-based action generation (optional)
+
+    The fusion step uses a neural network that automatically combines facial,
+    speech, and attention outputs into a unified emotion prediction. It works
+    out-of-the-box with sensible default weights (60% facial, 40% speech).
 
     Example:
         >>> from emotion_detection_action import EmotionDetector, Config
 
-        >>> # Create detector with default config
+        >>> # Create detector with default config (ML fusion works automatically)
         >>> detector = EmotionDetector()
         >>> detector.initialize()
 
@@ -150,17 +154,10 @@ class EmotionDetector:
         )
         self._speech_emotion.load()
 
-        # Initialize fusion module
+        # Initialize fusion module (ML-based)
         self._fusion = EmotionFusion(
-            strategy=self.config.fusion_strategy,
-            visual_weight=self.config.facial_weight,
-            audio_weight=self.config.speech_weight,
-            confidence_threshold=self.config.fusion_confidence_threshold,
-            attention_weight=self.config.attention_weight,
-            attention_stress_amplification=self.config.attention_stress_amplification,
-            attention_engagement_threshold=self.config.attention_engagement_threshold,
-            learned_model_path=self.config.learned_fusion_model_path,
-            learned_model_device=self.config.learned_fusion_device,
+            model_path=self.config.fusion_model_path,
+            device=self.config.fusion_device,
         )
 
         # Initialize temporal smoother

@@ -354,54 +354,6 @@ class TestModelSaveLoad:
             assert result is not None
 
 
-class TestEmotionFusionWithLearned:
-    """Tests for EmotionFusion class with learned strategy."""
-
-    def test_learned_strategy_init(self):
-        """Test EmotionFusion initialization with learned strategy."""
-        from emotion_detection_action.emotion.fusion import EmotionFusion
-
-        fusion = EmotionFusion(strategy="learned")
-        assert fusion.strategy == "learned"
-        assert fusion._learned_fusion is not None
-
-    def test_learned_strategy_fuse(self):
-        """Test fusion with learned strategy."""
-        from emotion_detection_action.emotion.fusion import EmotionFusion
-
-        fusion = EmotionFusion(strategy="learned")
-        facial = create_facial_result(happy=0.7, neutral=0.3)
-        speech = create_speech_result(happy=0.5, sad=0.5)
-
-        result = fusion.fuse(facial, speech)
-
-        assert result is not None
-        assert result.facial_result is not None
-        assert result.speech_result is not None
-
-    def test_learned_strategy_with_model_path(self):
-        """Test learned strategy with custom model path."""
-        from emotion_detection_action.emotion.fusion import EmotionFusion
-        from emotion_detection_action.emotion.learned_fusion import FusionMLP, save_model
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Save a model
-            model = FusionMLP()
-            model_path = Path(tmpdir) / "custom.pt"
-            save_model(model, model_path)
-
-            # Use it in EmotionFusion
-            fusion = EmotionFusion(
-                strategy="learned",
-                learned_model_path=str(model_path),
-            )
-
-            facial = create_facial_result(angry=0.8)
-            result = fusion.fuse(facial, None)
-
-            assert result is not None
-
-
 class TestCreateUntrainedModel:
     """Tests for create_untrained_model function."""
 

@@ -39,19 +39,6 @@ class TestConfig:
         assert config.face_detection_threshold == 0.5
         assert config.face_detection_model == "mediapipe"
 
-    def test_invalid_facial_weight(self):
-        """Test validation of facial_weight."""
-        with pytest.raises(ValueError, match="facial_weight must be between 0 and 1"):
-            Config(facial_weight=1.5)
-
-        with pytest.raises(ValueError, match="facial_weight must be between 0 and 1"):
-            Config(facial_weight=-0.1)
-
-    def test_invalid_speech_weight(self):
-        """Test validation of speech_weight."""
-        with pytest.raises(ValueError, match="speech_weight must be between 0 and 1"):
-            Config(speech_weight=2.0)
-
     def test_invalid_face_detection_threshold(self):
         """Test validation of face_detection_threshold."""
         with pytest.raises(ValueError, match="face_detection_threshold must be between 0 and 1"):
@@ -103,10 +90,8 @@ class TestConfig:
     def test_fusion_settings(self):
         """Test fusion-related settings."""
         config = Config(
-            fusion_strategy="weighted",
-            facial_weight=0.7,
-            speech_weight=0.3,
+            fusion_model_path="models/fusion.pt",
+            fusion_device="cuda",
         )
-        assert config.fusion_strategy == "weighted"
-        assert config.facial_weight == 0.7
-        assert config.speech_weight == 0.3
+        assert config.fusion_model_path == "models/fusion.pt"
+        assert config.fusion_device == "cuda"

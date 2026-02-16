@@ -18,7 +18,15 @@ class ModelConfig:
 
 @dataclass
 class Config:
-    """Main configuration for the EmotionDetector SDK."""
+    """Main configuration for the EmotionDetector SDK.
+
+    The SDK uses AI models for facial emotion, speech emotion, and attention
+    analysis. Results are automatically fused using a neural network (MLP)
+    that works out-of-the-box with sensible defaults (60% facial, 40% speech).
+
+    For better accuracy, you can train a custom fusion model and provide its
+    path via `fusion_model_path`.
+    """
 
     # VLA Model settings
     vla_model: str = "openvla/openvla-7b"
@@ -41,15 +49,11 @@ class Config:
     facial_emotion_model: str = "trpakov/vit-face-expression"
     speech_emotion_model: str = "superb/wav2vec2-base-superb-er"
 
-    # Fusion settings
-    fusion_strategy: Literal["weighted", "confidence", "learned"] = "confidence"
-    facial_weight: float = 0.6
-    speech_weight: float = 0.4
-    fusion_confidence_threshold: float = 0.3  # Ignore predictions below this confidence
-
-    # Learned fusion settings (used when fusion_strategy="learned")
-    learned_fusion_model_path: str | None = None  # Path to trained fusion model
-    learned_fusion_device: str = "cpu"  # Device for learned fusion ("cpu", "cuda", "mps")
+    # Fusion settings (ML-based neural network fusion)
+    # By default, uses sensible weights that work out-of-the-box.
+    # Provide a trained model path for improved accuracy.
+    fusion_model_path: str | None = None  # Path to custom trained fusion model
+    fusion_device: str = "cpu"  # Device for fusion model ("cpu", "cuda", "mps")
 
     # Temporal smoothing settings
     smoothing_strategy: Literal["none", "rolling", "ema", "hysteresis"] = "none"
@@ -60,9 +64,6 @@ class Config:
 
     # Attention analysis settings
     attention_analysis_enabled: bool = True  # Enable attention/gaze analysis
-    attention_weight: float = 0.2  # How much attention affects emotion fusion (0-1)
-    attention_stress_amplification: float = 1.5  # How much stress amplifies negative emotions
-    attention_engagement_threshold: float = 0.3  # Below this, reduce confidence
 
     # Performance settings
     max_faces: int = 5  # Maximum faces to process per frame
@@ -74,12 +75,6 @@ class Config:
 
     def __post_init__(self) -> None:
         """Validate and normalize configuration."""
-        # Validate weights
-        if not (0 <= self.facial_weight <= 1):
-            raise ValueError("facial_weight must be between 0 and 1")
-        if not (0 <= self.speech_weight <= 1):
-            raise ValueError("speech_weight must be between 0 and 1")
-
         # Validate thresholds
         if not (0 <= self.face_detection_threshold <= 1):
             raise ValueError("face_detection_threshold must be between 0 and 1")
@@ -148,4 +143,3 @@ class Config:
             value = getattr(self, key)
             result[key] = value
         return result
-

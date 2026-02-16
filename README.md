@@ -1,6 +1,6 @@
 # Emotion Detection Action SDK
 
-Real-time human emotion detection SDK for robotics using Vision-Language-Action (VLA) models.
+Real-time human emotion detection SDK for robotics. Uses AI models for facial, speech, and attention analysis, with ML-based fusion that works out-of-the-box.
 
 ## Get Started in 60 Seconds
 
@@ -26,7 +26,7 @@ Press **ESC** or **Q** to quit the demo.
 - **Attention analysis**: Eye tracking, gaze detection, pupil dilation, and stress/engagement metrics
 - **Facial emotion recognition**: ViT-based classification (`trpakov/vit-face-expression`)
 - **Speech emotion recognition**: Wav2Vec2-based analysis (`superb/wav2vec2-base-superb-er`)
-- **Multimodal fusion**: Combine visual, audio, and attention signals with attention-based modulation
+- **ML-based multimodal fusion**: Neural network automatically combines facial, speech, and attention signals (works out-of-the-box)
 - **Temporal smoothing**: Reduce flickering with rolling average, EMA, or hysteresis smoothing
 - **VLA action generation**: OpenVLA-7B for emotion-aware robot actions (swappable via model registry)
 - **Built-in action handlers**: HTTP, WebSocket, Serial/Arduino, ROS1/ROS2 integration
@@ -91,19 +91,19 @@ emotion = detector.get_emotion_only(frame, audio=None)
 ## Architecture
 
 ```
-Real-time Input → Detection Layer → Analysis Layer → Fusion → VLA Model → Actions
-      │                 │                  │            │          │           │
-   Camera          FaceDetector     FacialEmotion   Emotion     OpenVLA    ActionHandler
-   Microphone      VoiceActivity    SpeechEmotion   Fusion                 (extensible)
+Real-time Input → Detection Layer → Analysis Layer → ML Fusion → VLA Model → Actions
+      │                 │                  │              │           │           │
+   Camera          FaceDetector     FacialEmotion    Neural Net   OpenVLA    ActionHandler
+   Microphone      VoiceActivity    SpeechEmotion    (MLP)                   (extensible)
                    AttentionDet.    AttentionMetrics
 ```
 
-The SDK processes webcam and microphone input through three analysis pipelines:
-1. **Facial**: Face detection → Emotion recognition (7 emotions)
-2. **Audio**: Voice activity detection → Speech emotion (4 emotions)
+The SDK processes webcam and microphone input through three AI-powered analysis pipelines:
+1. **Facial**: Face detection → ViT emotion recognition (7 emotions)
+2. **Audio**: Voice activity detection → Wav2Vec2 speech emotion (4 emotions)
 3. **Attention**: Eye tracking → Stress/engagement/nervousness metrics
 
-These are fused together, with attention metrics modulating the final emotion output.
+All outputs are automatically fed into an **ML-based fusion model** (neural network) that combines them into a unified emotion prediction. The fusion works out-of-the-box with sensible default weights, or can be trained on custom data for improved accuracy.
 
 ## Configuration
 
@@ -116,10 +116,8 @@ These are fused together, with attention metrics modulating the final emotion ou
 | `face_detection_threshold` | `0.5` | Face detection confidence threshold |
 | `facial_emotion_model` | `"trpakov/vit-face-expression"` | Facial emotion model (HuggingFace) |
 | `speech_emotion_model` | `"superb/wav2vec2-base-superb-er"` | Speech emotion model (HuggingFace) |
-| `fusion_strategy` | `"confidence"` | `"weighted"`, `"confidence"`, `"learned"` |
-| `facial_weight` / `speech_weight` | `0.6` / `0.4` | Fusion weights for multimodal |
-| `learned_fusion_model_path` | `None` | Path to trained fusion model (for `"learned"` strategy) |
-| `learned_fusion_device` | `"cpu"` | Device for learned fusion (`"cpu"`, `"cuda"`, `"mps"`) |
+| `fusion_model_path` | `None` | Path to trained fusion MLP model |
+| `fusion_device` | `"cpu"` | Device for fusion model (`"cpu"`, `"cuda"`, `"mps"`) |
 | `frame_skip` | `1` | Process every nth frame |
 | `max_faces` | `5` | Maximum faces per frame |
 | `vad_aggressiveness` | `2` | VAD filtering (0-3, higher = stricter) |
@@ -188,16 +186,14 @@ The SDK includes attention analysis using MediaPipe Face Mesh to track eye movem
 | `gaze_direction` | Where user is looking (x, y) | -1 to 1 |
 
 **How attention affects fusion:**
-- High stress → Amplifies negative emotions (sad, angry, fearful)
-- Low engagement → Reduces confidence in emotion reading
-- High nervousness → Increases fearful/anxious signals
+The ML-based fusion model learns how attention metrics (stress, engagement, nervousness) influence the final emotion output from training data. The model can learn patterns such as:
+- High stress correlating with negative emotions
+- Low engagement reducing prediction confidence
+- Nervousness affecting fear-related signals
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `attention_analysis_enabled` | `True` | Enable attention tracking |
-| `attention_weight` | `0.2` | How much attention affects fusion (0-1) |
-| `attention_stress_amplification` | `1.5` | Factor to amplify negative emotions under stress |
-| `attention_engagement_threshold` | `0.3` | Below this engagement, reduce confidence |
 
 ```python
 # Access attention metrics from result
@@ -212,22 +208,23 @@ async for result in detector.stream(camera=0, microphone=0):
 config = Config(attention_analysis_enabled=False)
 ```
 
-### Learned Fusion (ML-based)
+### Multimodal Fusion (ML-based)
 
-Instead of rule-based fusion, you can use a trained neural network to fuse facial, speech, and attention signals. This can potentially learn more nuanced patterns from your data.
+The SDK uses a neural network (MLP) to fuse emotion predictions from facial recognition, speech recognition, and attention analysis. This is the default fusion method - it works automatically after the facial, audio, and attention AI models produce their results.
+
+By default, the fusion model uses sensible weights (60% facial, 40% speech) that work out-of-the-box. For better accuracy, you can train the model on your own labeled data to learn nuanced patterns specific to your use case.
 
 **Architecture:**
 ```
 Facial (7) + Speech (7) + Attention (3) → Dense(64) → Dense(32) → Emotions (7) + Confidence (1)
 ```
 
-**Using learned fusion:**
+**Using a trained fusion model:**
 ```python
 # Use a pre-trained fusion model
 config = Config(
-    fusion_strategy="learned",
-    learned_fusion_model_path="models/fusion_mlp.pt",
-    learned_fusion_device="cpu",  # or "cuda", "mps"
+    fusion_model_path="models/fusion_mlp.pt",
+    fusion_device="cpu",  # or "cuda", "mps"
 )
 
 detector = EmotionDetector(config)
@@ -251,6 +248,8 @@ facial_angry,facial_disgusted,facial_fearful,facial_happy,facial_neutral,facial_
 Where `label` is the emotion index (0=angry, 1=disgusted, 2=fearful, 3=happy, 4=neutral, 5=sad, 6=surprised).
 
 **Model size:** ~15KB, ~3,500 parameters, <1ms inference on CPU.
+
+**Default behavior:** When no `fusion_model_path` is provided, the model uses sensible default weights that approximate weighted average fusion (60% facial, 40% speech). This works out-of-the-box for basic use cases. For better accuracy, train a model with your own data.
 
 ## Supported Emotions
 

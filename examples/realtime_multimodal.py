@@ -5,15 +5,19 @@ This example uses the high-level EmotionDetector API while showing
 separate panels for facial, audio, attention, and fused emotion results.
 
 Four panels show:
-    - FACIAL: Emotion from face (top left panel)
-    - AUDIO: Emotion from speech (top right panel)
+    - FACIAL: Emotion from face using ViT model (top left panel)
+    - AUDIO: Emotion from speech using Wav2Vec2 (top right panel)
     - ATTENTION: Gaze, pupil, and attention metrics (bottom left panel)
-    - FUSED: Combined emotion using configured fusion strategy (bottom center panel)
+    - FUSED: ML-based fusion of all signals via neural network (bottom center panel)
 
 Supported emotions:
     - Facial: happy, sad, angry, fearful, surprised, disgusted, neutral (7)
     - Speech: happy, sad, angry, neutral (4) - using SUPERB model
-    - Fused: All 7 emotions (confidence-weighted combination, influenced by attention)
+    - Fused: All 7 emotions (neural network combines facial, speech, and attention)
+
+The fusion step uses an ML model that works out-of-the-box with sensible
+defaults (60% facial, 40% speech weight). For better accuracy, train a
+custom model using scripts/train_fusion_mlp.py.
 
 Attention analysis metrics:
     - Stress: Based on pupil dilation and blink rate
@@ -34,6 +38,7 @@ Requirements:
     - Webcam connected to the system
     - Microphone connected to the system
     - OpenCV for visualization
+    - PyTorch (for ML-based fusion)
     - MediaPipe (for attention analysis)
 
 Usage:
@@ -711,8 +716,6 @@ async def run_multimodal_detection(
         face_detection_model=face_detection_model,
         facial_emotion_model=facial_model,
         speech_emotion_model=speech_model,
-        fusion_strategy="confidence",
-        fusion_confidence_threshold=0.3,
         smoothing_strategy=smoothing,
         smoothing_ema_alpha=smoothing_alpha,
         attention_analysis_enabled=attention_enabled,

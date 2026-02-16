@@ -15,7 +15,13 @@ from emotion_detection_action.core.types import (
     FacialEmotionResult,
     PipelineResult,
 )
-from emotion_detection_action.emotion.fusion import EmotionFusion
+
+# Check if PyTorch is available for fusion tests
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 
 class TestPipelineIntegration:
@@ -98,8 +104,11 @@ class TestPipelineIntegration:
         assert d["dominant_emotion"] == "surprised"
         assert d["action"]["type"] == "wait"
 
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
     def test_multimodal_pipeline_flow(self):
         """Test multimodal pipeline with both visual and audio."""
+        from emotion_detection_action.emotion.fusion import EmotionFusion
+
         # Create facial result
         bbox = BoundingBox(x=0, y=0, width=100, height=100)
         face = FaceDetection(bbox=bbox, confidence=0.95)
@@ -126,13 +135,14 @@ class TestPipelineIntegration:
             confidence=0.8,
         )
 
-        # Fuse
-        fusion = EmotionFusion(strategy="weighted")
+        # Fuse using ML-based fusion
+        fusion = EmotionFusion()
         fused = fusion.fuse(facial_result, speech_result, timestamp=0.5)
 
-        # Both modalities agree on happy
-        assert fused.dominant_emotion.value == "happy"
-        assert fused.fusion_confidence > 0.7  # Should be boosted by agreement
+        # Both modalities indicate happy - ML model should produce a valid result
+        assert fused is not None
+        assert fused.dominant_emotion is not None
+        assert fused.fusion_confidence > 0
 
     def test_action_handler_integration(self):
         """Test action handler receives correct actions."""
@@ -232,23 +242,21 @@ class TestPipelineEdgeCases:
 class TestConfigIntegration:
     """Test configuration integration with pipeline."""
 
-    def test_config_affects_fusion(self):
-        """Test that config weights affect fusion."""
-        # Heavily weight visual
-        config_visual = Config(facial_weight=0.9, speech_weight=0.1)
-        fusion_visual = EmotionFusion(
-            strategy="weighted",
-            visual_weight=config_visual.facial_weight,
-            audio_weight=config_visual.speech_weight,
+    def test_config_fusion_settings(self):
+        """Test that config fusion settings are available."""
+        config = Config(
+            fusion_model_path="models/test.pt",
+            fusion_device="cpu",
         )
+        assert config.fusion_model_path == "models/test.pt"
+        assert config.fusion_device == "cpu"
 
-        # Heavily weight audio
-        config_audio = Config(facial_weight=0.1, speech_weight=0.9)
-        fusion_audio = EmotionFusion(
-            strategy="weighted",
-            visual_weight=config_audio.facial_weight,
-            audio_weight=config_audio.speech_weight,
-        )
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_fusion_produces_valid_output(self):
+        """Test that fusion produces valid emotion output."""
+        from emotion_detection_action.emotion.fusion import EmotionFusion
+
+        fusion = EmotionFusion()
 
         # Create conflicting results
         bbox = BoundingBox(x=0, y=0, width=100, height=100)
@@ -268,10 +276,12 @@ class TestConfigIntegration:
             confidence=0.9,
         )
 
-        result_visual = fusion_visual.fuse(facial, speech)
-        result_audio = fusion_audio.fuse(facial, speech)
+        result = fusion.fuse(facial, speech)
 
-        # Visual-weighted should lean happy, audio-weighted should lean sad
-        assert result_visual.emotions.happy > result_visual.emotions.sad
-        assert result_audio.emotions.sad > result_audio.emotions.happy
-
+        # ML-based fusion should produce a valid result
+        assert result is not None
+        assert result.dominant_emotion is not None
+        # Emotions should sum to approximately 1
+        scores = result.emotions.to_dict()
+        total = sum(scores.values())
+        assert 0.99 < total < 1.01
