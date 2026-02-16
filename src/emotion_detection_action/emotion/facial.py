@@ -171,70 +171,6 @@ class FacialEmotionRecognizer(BaseModel[FaceDetection, FacialEmotionResult]):
             confidence=confidence,
         )
 
-    def predict_batch(
-        self,
-        face_detections: list[FaceDetection],
-    ) -> list[FacialEmotionResult]:
-        """Predict emotions for multiple face detections.
-
-        Args:
-            face_detections: List of face detections.
-
-        Returns:
-            List of emotion results.
-        """
-        if not self._is_loaded:
-            raise RuntimeError("Model not loaded. Call load() first.")
-
-        if not face_detections:
-            return []
-
-        # Filter detections with face images
-        valid_detections = [d for d in face_detections if d.face_image is not None]
-
-        if not valid_detections:
-            return []
-
-        # Preprocess all images
-        import cv2
-        face_images = []
-        for det in valid_detections:
-            img = det.face_image
-            if img is not None:
-                if len(img.shape) == 3 and img.shape[2] == 3:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                face_images.append(img)
-
-        # Batch process
-        inputs = self._processor(
-            images=face_images,
-            return_tensors="pt",
-        )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = self._model(**inputs)
-            logits = outputs.logits
-
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        probs = probs.cpu().numpy()
-
-        # Create results
-        results = []
-        for i, det in enumerate(valid_detections):
-            emotion_dict = self._map_to_emotions(probs[i])
-            emotions = EmotionScores.from_dict(emotion_dict)
-
-            results.append(
-                FacialEmotionResult(
-                    face_detection=det,
-                    emotions=emotions,
-                    confidence=float(np.max(probs[i])),
-                )
-            )
-
-        return results
-
     def _map_to_emotions(self, probs: np.ndarray) -> dict[str, float]:
         """Map model output probabilities to standard emotion labels.
 
@@ -278,29 +214,4 @@ class FacialEmotionRecognizer(BaseModel[FaceDetection, FacialEmotionResult]):
                     emotion_dict["disgusted"] += prob * 0.5
 
         return emotion_dict
-
-    def predict_from_image(self, image: np.ndarray) -> FacialEmotionResult | None:
-        """Predict emotions directly from an image (skipping face detection).
-
-        Useful when face is already cropped.
-
-        Args:
-            image: Face image as numpy array (H, W, C).
-
-        Returns:
-            Emotion result or None if prediction fails.
-        """
-        # Create a dummy face detection
-        dummy_detection = FaceDetection(
-            bbox=type("BBox", (), {
-                "x": 0, "y": 0,
-                "width": image.shape[1],
-                "height": image.shape[0],
-                "to_tuple": lambda s: (0, 0, image.shape[1], image.shape[0]),
-                "to_xyxy": lambda s: (0, 0, image.shape[1], image.shape[0]),
-            })(),  # type: ignore
-            confidence=1.0,
-            face_image=image,
-        )
-        return self.predict(dummy_detection)
 

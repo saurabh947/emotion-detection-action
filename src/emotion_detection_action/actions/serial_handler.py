@@ -284,65 +284,6 @@ class SerialActionHandler(BaseActionHandler):
 
         return None
 
-    def send_raw(self, message: str) -> bool:
-        """Send a raw message string.
-
-        Args:
-            message: Raw message to send.
-
-        Returns:
-            True if sent successfully.
-        """
-        if not self._is_connected or self._serial is None:
-            return False
-
-        try:
-            self._serial.write(message.encode("utf-8"))
-            return True
-        except Exception:
-            return False
-
-    def read_line(self, timeout: float | None = None) -> str | None:
-        """Read a line from the serial port.
-
-        Args:
-            timeout: Read timeout (uses default if None).
-
-        Returns:
-            Received line or None.
-        """
-        if not self._is_connected or self._serial is None:
-            return None
-
-        try:
-            if timeout is not None:
-                self._serial.timeout = timeout
-
-            line = self._serial.readline().decode("utf-8").strip()
-            self._bytes_received += len(line)
-            return line if line else None
-
-        except Exception:
-            return None
-
-    def read_available(self) -> str | None:
-        """Read all available data from the serial port.
-
-        Returns:
-            Available data or None.
-        """
-        if not self._is_connected or self._serial is None:
-            return None
-
-        try:
-            if self._serial.in_waiting > 0:
-                data = self._serial.read(self._serial.in_waiting).decode("utf-8")
-                self._bytes_received += len(data)
-                return data
-            return None
-        except Exception:
-            return None
-
     @staticmethod
     def list_ports() -> list[dict[str, Any]]:
         """List available serial ports.

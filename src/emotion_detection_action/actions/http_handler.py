@@ -330,24 +330,6 @@ class WebSocketActionHandler(BaseActionHandler):
             self._is_connected = False
             return False
 
-    def send_raw(self, message: str) -> bool:
-        """Send a raw message string.
-
-        Args:
-            message: Raw message to send.
-
-        Returns:
-            True if sent successfully.
-        """
-        if not self._is_connected or self._ws is None:
-            return False
-
-        try:
-            self._ws.send(message)
-            return True
-        except Exception:
-            return False
-
     def receive(self, timeout: float = 1.0) -> str | None:
         """Receive a message from the WebSocket.
 

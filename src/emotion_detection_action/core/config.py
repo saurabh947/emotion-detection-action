@@ -13,7 +13,6 @@ class ModelConfig:
     dtype: str = "float32"
     cache_dir: str | None = None
     load_in_8bit: bool = False
-    load_in_4bit: bool = False
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -29,14 +28,13 @@ class Config:
     device: str = "cuda"  # "cuda", "cpu", "mps"
     dtype: str = "float16"  # "float16", "float32", "bfloat16"
 
-    # Face detection settings
-    face_detection_model: str = "retinaface"  # "retinaface" or "mtcnn"
-    face_detection_threshold: float = 0.9
+    # Face detection settings (MediaPipe)
+    face_detection_model: str = "mediapipe"  # "mediapipe" (short-range) or "mediapipe-full" (long-range)
+    face_detection_threshold: float = 0.5  # MediaPipe confidence threshold
     face_min_size: int = 20
 
     # Voice activity detection settings
     vad_aggressiveness: int = 2  # 0-3, higher = more aggressive filtering
-    voice_activity_threshold: float = 0.5
     sample_rate: int = 16000
 
     # Emotion model settings
@@ -44,10 +42,14 @@ class Config:
     speech_emotion_model: str = "superb/wav2vec2-base-superb-er"
 
     # Fusion settings
-    fusion_strategy: Literal["average", "weighted", "max", "confidence"] = "confidence"
+    fusion_strategy: Literal["weighted", "confidence", "learned"] = "confidence"
     facial_weight: float = 0.6
     speech_weight: float = 0.4
     fusion_confidence_threshold: float = 0.3  # Ignore predictions below this confidence
+
+    # Learned fusion settings (used when fusion_strategy="learned")
+    learned_fusion_model_path: str | None = None  # Path to trained fusion model
+    learned_fusion_device: str = "cpu"  # Device for learned fusion ("cpu", "cuda", "mps")
 
     # Temporal smoothing settings
     smoothing_strategy: Literal["none", "rolling", "ema", "hysteresis"] = "none"
@@ -63,7 +65,6 @@ class Config:
     attention_engagement_threshold: float = 0.3  # Below this, reduce confidence
 
     # Performance settings
-    batch_size: int = 1
     max_faces: int = 5  # Maximum faces to process per frame
     frame_skip: int = 1  # Process every nth frame
     cache_dir: str | None = None
@@ -82,8 +83,6 @@ class Config:
         # Validate thresholds
         if not (0 <= self.face_detection_threshold <= 1):
             raise ValueError("face_detection_threshold must be between 0 and 1")
-        if not (0 <= self.voice_activity_threshold <= 1):
-            raise ValueError("voice_activity_threshold must be between 0 and 1")
 
         # Validate VAD aggressiveness
         if self.vad_aggressiveness not in (0, 1, 2, 3):
@@ -136,20 +135,6 @@ class Config:
             cache_dir=self.cache_dir,
             load_in_8bit=True,  # VLA models are large, use quantization by default
         )
-
-    def get_smoothing_config(self) -> dict[str, Any]:
-        """Get configuration for temporal smoothing.
-
-        Returns:
-            Dictionary with smoothing configuration parameters.
-        """
-        return {
-            "strategy": self.smoothing_strategy,
-            "window_size": self.smoothing_window,
-            "ema_alpha": self.smoothing_ema_alpha,
-            "hysteresis_threshold": self.smoothing_hysteresis_threshold,
-            "hysteresis_frames": self.smoothing_hysteresis_frames,
-        }
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "Config":

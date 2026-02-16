@@ -160,40 +160,6 @@ class LoggingActionHandler(BaseActionHandler):
             "avg_confidence": total_confidence / len(self._action_history),
         }
 
-    @classmethod
-    def create_file_logger(
-        cls,
-        log_file: str | None = None,
-    ) -> "LoggingActionHandler":
-        """Create a handler that logs to a file.
-
-        Args:
-            log_file: Path to log file. If None, only prints to stdout.
-
-        Returns:
-            Configured LoggingActionHandler.
-        """
-        import json
-        from datetime import datetime
-
-        log_handle = None
-        if log_file:
-            log_handle = open(log_file, "a")
-
-        def log_callback(action: ActionCommand) -> None:
-            record = {
-                "timestamp": datetime.now().isoformat(),
-                "action_type": action.action_type,
-                "parameters": action.parameters,
-                "confidence": action.confidence,
-            }
-            if log_handle:
-                log_handle.write(json.dumps(record) + "\n")
-                log_handle.flush()
-
-        handler = cls(name="file_logger", verbose=True, callback=log_callback)
-        return handler
-
 
 class MockActionHandler(LoggingActionHandler):
     """Mock action handler for unit testing.

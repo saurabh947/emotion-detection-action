@@ -1,6 +1,9 @@
 """Multimodal emotion fusion module."""
 
-from typing import Literal
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -12,12 +15,20 @@ from emotion_detection_action.core.types import (
     SpeechEmotionResult,
 )
 
+if TYPE_CHECKING:
+    from emotion_detection_action.emotion.learned_fusion import LearnedEmotionFusion
+
 
 class EmotionFusion:
     """Fuses facial, speech, and attention analysis results.
 
     Combines emotion predictions from multiple modalities (visual, audio, and
     attention) into a unified emotion result using various fusion strategies.
+
+    Strategies:
+    - "weighted": Weighted average based on visual/audio weights
+    - "confidence": Weight by model confidence scores (default)
+    - "learned": Use a trained neural network for fusion
 
     Attention analysis affects the fusion by:
     - High stress amplifies negative emotions (sad, angry, fearful)
@@ -28,26 +39,31 @@ class EmotionFusion:
         >>> fusion = EmotionFusion(strategy="confidence", confidence_threshold=0.3)
         >>> result = fusion.fuse(facial_result, speech_result, attention_result, timestamp=1.5)
         >>> print(result.emotions.dominant_emotion)
+
+        # Using learned fusion with a trained model
+        >>> fusion = EmotionFusion(strategy="learned", learned_model_path="models/fusion.pt")
+        >>> result = fusion.fuse(facial_result, speech_result, attention_result)
     """
 
     def __init__(
         self,
-        strategy: Literal["average", "weighted", "max", "confidence"] = "confidence",
+        strategy: Literal["weighted", "confidence", "learned"] = "confidence",
         visual_weight: float = 0.6,
         audio_weight: float = 0.4,
         confidence_threshold: float = 0.3,
         attention_weight: float = 0.2,
         attention_stress_amplification: float = 1.5,
         attention_engagement_threshold: float = 0.3,
+        learned_model_path: str | Path | None = None,
+        learned_model_device: str = "cpu",
     ) -> None:
         """Initialize the fusion module.
 
         Args:
             strategy: Fusion strategy to use.
-                - "average": Simple average of all modalities
                 - "weighted": Weighted average based on visual/audio weights
-                - "max": Take maximum probability for each emotion
                 - "confidence": Weight by model confidence scores (default)
+                - "learned": Use a trained neural network for fusion
             visual_weight: Weight for visual (facial) emotions (0-1).
             audio_weight: Weight for audio (speech) emotions (0-1).
             confidence_threshold: Minimum confidence to include a modality in fusion.
@@ -55,6 +71,8 @@ class EmotionFusion:
             attention_weight: How much attention affects the final result (0-1).
             attention_stress_amplification: Factor to amplify negative emotions under stress.
             attention_engagement_threshold: Below this engagement, reduce confidence.
+            learned_model_path: Path to trained fusion model weights (for "learned" strategy).
+            learned_model_device: Device to run learned model on ("cpu", "cuda", "mps").
         """
         self.strategy = strategy
         self.visual_weight = visual_weight
@@ -63,12 +81,33 @@ class EmotionFusion:
         self.attention_weight = attention_weight
         self.attention_stress_amplification = attention_stress_amplification
         self.attention_engagement_threshold = attention_engagement_threshold
+        self.learned_model_path = learned_model_path
+        self.learned_model_device = learned_model_device
 
         # Normalize weights
         total = visual_weight + audio_weight
         if total > 0:
             self.visual_weight = visual_weight / total
             self.audio_weight = audio_weight / total
+
+        # Initialize learned fusion model if needed
+        self._learned_fusion: LearnedEmotionFusion | None = None
+        if strategy == "learned":
+            self._init_learned_fusion()
+
+    def _init_learned_fusion(self) -> None:
+        """Initialize the learned fusion model."""
+        from emotion_detection_action.emotion.learned_fusion import (
+            LearnedEmotionFusion,
+            LearnedFusionConfig,
+        )
+
+        config = LearnedFusionConfig(
+            model_path=str(self.learned_model_path) if self.learned_model_path else None,
+            device=self.learned_model_device,
+        )
+        self._learned_fusion = LearnedEmotionFusion(config=config)
+        self._learned_fusion.load()
 
     def fuse(
         self,
@@ -99,6 +138,15 @@ class EmotionFusion:
         Raises:
             ValueError: If no results pass the confidence threshold.
         """
+        # Use learned fusion if strategy is "learned"
+        if self.strategy == "learned" and self._learned_fusion is not None:
+            return self._learned_fusion.fuse(
+                facial_result=facial_result,
+                speech_result=speech_result,
+                attention_result=attention_result,
+                timestamp=timestamp,
+            )
+
         # Apply confidence thresholding
         facial_valid = (
             facial_result is not None and 
@@ -131,16 +179,10 @@ class EmotionFusion:
             # Both modalities available and pass threshold - fuse them
             assert facial_to_use is not None and speech_to_use is not None
 
-            if self.strategy == "average":
-                emotions = self._fuse_average(facial_to_use, speech_to_use)
-            elif self.strategy == "weighted":
+            if self.strategy == "weighted":
                 emotions = self._fuse_weighted(facial_to_use, speech_to_use)
-            elif self.strategy == "max":
-                emotions = self._fuse_max(facial_to_use, speech_to_use)
-            elif self.strategy == "confidence":
+            else:  # "confidence" (default)
                 emotions = self._fuse_confidence(facial_to_use, speech_to_use)
-            else:
-                emotions = self._fuse_weighted(facial_to_use, speech_to_use)
 
             # Calculate fusion confidence
             base_confidence = self._calculate_fusion_confidence(
@@ -236,22 +278,6 @@ class EmotionFusion:
 
         return max(0.0, min(1.0, confidence))
 
-    def _fuse_average(
-        self,
-        facial: FacialEmotionResult,
-        speech: SpeechEmotionResult,
-    ) -> EmotionScores:
-        """Simple average fusion."""
-        facial_dict = facial.emotions.to_dict()
-        speech_dict = speech.emotions.to_dict()
-
-        fused = {
-            key: (facial_dict[key] + speech_dict[key]) / 2
-            for key in facial_dict
-        }
-
-        return EmotionScores.from_dict(fused)
-
     def _fuse_weighted(
         self,
         facial: FacialEmotionResult,
@@ -271,27 +297,6 @@ class EmotionFusion:
 
         return EmotionScores.from_dict(fused)
 
-    def _fuse_max(
-        self,
-        facial: FacialEmotionResult,
-        speech: SpeechEmotionResult,
-    ) -> EmotionScores:
-        """Maximum fusion - take highest probability for each emotion."""
-        facial_dict = facial.emotions.to_dict()
-        speech_dict = speech.emotions.to_dict()
-
-        fused = {
-            key: max(facial_dict[key], speech_dict[key])
-            for key in facial_dict
-        }
-
-        # Normalize to sum to 1
-        total = sum(fused.values())
-        if total > 0:
-            fused = {k: v / total for k, v in fused.items()}
-
-        return EmotionScores.from_dict(fused)
-
     def _fuse_confidence(
         self,
         facial: FacialEmotionResult,
@@ -303,7 +308,8 @@ class EmotionFusion:
 
         total_conf = facial.confidence + speech.confidence
         if total_conf == 0:
-            return self._fuse_average(facial, speech)
+            # Fallback to weighted fusion if both confidences are zero
+            return self._fuse_weighted(facial, speech)
 
         facial_weight = facial.confidence / total_conf
         speech_weight = speech.confidence / total_conf

@@ -21,7 +21,7 @@ Press **ESC** or **Q** to quit the demo.
 ## Features
 
 - **Real-time emotion detection**: Live webcam + microphone processing
-- **Face detection**: Automatic face detection using MTCNN or RetinaFace (configurable)
+- **Face detection**: Automatic face detection using MediaPipe (fast and lightweight)
 - **Voice activity detection**: Detect human speech using WebRTC VAD
 - **Attention analysis**: Eye tracking, gaze detection, pupil dilation, and stress/engagement metrics
 - **Facial emotion recognition**: ViT-based classification (`trpakov/vit-face-expression`)
@@ -47,7 +47,6 @@ pip install -e .
 ### Optional Dependencies
 
 ```bash
-pip install -e ".[retinaface]"  # Better face detection (RetinaFace)
 pip install -e ".[robot]"       # Serial + WebSocket handlers
 pip install -e ".[vla]"         # VLA model support (requires GPU)
 pip install -e ".[dev]"         # Development tools (pytest, black, ruff)
@@ -113,29 +112,33 @@ These are fused together, with attention metrics modulating the final emotion ou
 | `vla_model` | `"openvla/openvla-7b"` | VLA model for action generation |
 | `vla_enabled` | `True` | Set `False` for emotion-only mode |
 | `device` | `"cuda"` | `"cuda"`, `"cpu"`, or `"mps"` |
-| `face_detection_model` | `"retinaface"` | Face detector: `"mtcnn"` or `"retinaface"` |
-| `face_detection_threshold` | `0.9` | Face detection confidence threshold |
+| `face_detection_model` | `"mediapipe"` | Face detector: `"mediapipe"` or `"mediapipe-full"` |
+| `face_detection_threshold` | `0.5` | Face detection confidence threshold |
 | `facial_emotion_model` | `"trpakov/vit-face-expression"` | Facial emotion model (HuggingFace) |
 | `speech_emotion_model` | `"superb/wav2vec2-base-superb-er"` | Speech emotion model (HuggingFace) |
-| `fusion_strategy` | `"confidence"` | `"average"`, `"weighted"`, `"max"`, `"confidence"` |
+| `fusion_strategy` | `"confidence"` | `"weighted"`, `"confidence"`, `"learned"` |
 | `facial_weight` / `speech_weight` | `0.6` / `0.4` | Fusion weights for multimodal |
+| `learned_fusion_model_path` | `None` | Path to trained fusion model (for `"learned"` strategy) |
+| `learned_fusion_device` | `"cpu"` | Device for learned fusion (`"cpu"`, `"cuda"`, `"mps"`) |
 | `frame_skip` | `1` | Process every nth frame |
 | `max_faces` | `5` | Maximum faces per frame |
 | `vad_aggressiveness` | `2` | VAD filtering (0-3, higher = stricter) |
 
 ### Face Detection Models
 
-| Model | Speed | Accuracy | Best For |
-|-------|-------|----------|----------|
-| `mtcnn` | Fast | Good | Real-time, well-lit conditions |
-| `retinaface` | Slower | Better | Challenging poses, small/occluded faces |
+The SDK uses MediaPipe for fast, lightweight face detection that works well on CPU.
+
+| Model | Range | Speed | Best For |
+|-------|-------|-------|----------|
+| `mediapipe` | ~2 meters | Very Fast | Close-up webcam use (default) |
+| `mediapipe-full` | ~5 meters | Fast | Larger distances, multiple users |
 
 ```python
-# Use RetinaFace for better accuracy (default)
-config = Config(face_detection_model="retinaface")
+# Use short-range model for close-up webcam (default)
+config = Config(face_detection_model="mediapipe")
 
-# Use MTCNN for faster real-time processing
-config = Config(face_detection_model="mtcnn")
+# Use full-range model for larger distances
+config = Config(face_detection_model="mediapipe-full")
 ```
 
 ### Temporal Smoothing
@@ -208,6 +211,46 @@ async for result in detector.stream(camera=0, microphone=0):
 # Disable attention analysis
 config = Config(attention_analysis_enabled=False)
 ```
+
+### Learned Fusion (ML-based)
+
+Instead of rule-based fusion, you can use a trained neural network to fuse facial, speech, and attention signals. This can potentially learn more nuanced patterns from your data.
+
+**Architecture:**
+```
+Facial (7) + Speech (7) + Attention (3) → Dense(64) → Dense(32) → Emotions (7) + Confidence (1)
+```
+
+**Using learned fusion:**
+```python
+# Use a pre-trained fusion model
+config = Config(
+    fusion_strategy="learned",
+    learned_fusion_model_path="models/fusion_mlp.pt",
+    learned_fusion_device="cpu",  # or "cuda", "mps"
+)
+
+detector = EmotionDetector(config)
+```
+
+**Training your own model:**
+```bash
+# Train with synthetic data (for testing)
+python scripts/train_fusion_mlp.py --output models/fusion_mlp.pt
+
+# Train with your own labeled data
+python scripts/train_fusion_mlp.py --data data/emotions.csv --output models/fusion_mlp.pt
+```
+
+**Training data format (CSV):**
+```csv
+facial_angry,facial_disgusted,facial_fearful,facial_happy,facial_neutral,facial_sad,facial_surprised,speech_angry,speech_disgusted,speech_fearful,speech_happy,speech_neutral,speech_sad,speech_surprised,stress_score,engagement_score,nervousness_score,label
+0.1,0.05,0.05,0.6,0.1,0.05,0.05,0.08,0.02,0.1,0.5,0.2,0.05,0.05,0.2,0.8,0.1,3
+```
+
+Where `label` is the emotion index (0=angry, 1=disgusted, 2=fearful, 3=happy, 4=neutral, 5=sad, 6=surprised).
+
+**Model size:** ~15KB, ~3,500 parameters, <1ms inference on CPU.
 
 ## Supported Emotions
 
@@ -298,10 +341,10 @@ detector = EmotionDetector(config, action_handler=MyRobotHandler())
 python examples/realtime_multimodal.py
 
 # With options
-python examples/realtime_multimodal.py --camera 1              # Different camera
-python examples/realtime_multimodal.py --smoothing ema         # Smoother output
-python examples/realtime_multimodal.py --face-detection mtcnn  # Faster face detection
-python examples/realtime_multimodal.py --no-attention          # Disable attention tracking
+python examples/realtime_multimodal.py --camera 1                    # Different camera
+python examples/realtime_multimodal.py --smoothing ema               # Smoother output
+python examples/realtime_multimodal.py --face-detection mediapipe-full  # Full-range model
+python examples/realtime_multimodal.py --no-attention                # Disable attention tracking
 ```
 
 The demo shows 4 panels:

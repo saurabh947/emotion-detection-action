@@ -20,9 +20,9 @@ Attention analysis metrics:
     - Engagement: Based on eye contact and fixation stability
     - Nervousness: Based on gaze aversion and instability
 
-Face detection models:
-    - mtcnn: Fast, good for real-time (default)
-    - retinaface: More accurate, better for challenging poses (requires: pip install retinaface)
+Face detection models (MediaPipe):
+    - mediapipe: Short-range model, optimized for faces within 2 meters (default)
+    - mediapipe-full: Full-range model, optimized for faces within 5 meters
 
 Temporal smoothing strategies:
     - none: No smoothing (raw per-frame output)
@@ -39,7 +39,7 @@ Requirements:
 Usage:
     python realtime_multimodal.py
     python realtime_multimodal.py --camera 1  # Use different camera
-    python realtime_multimodal.py --face-detection retinaface  # Use RetinaFace
+    python realtime_multimodal.py --face-detection mediapipe-full  # Use full-range model
     python realtime_multimodal.py --smoothing ema --smoothing-alpha 0.2  # Smoother output
     python realtime_multimodal.py --no-attention  # Disable attention analysis
 """
@@ -681,7 +681,7 @@ class MultimodalDisplay:
 
 async def run_multimodal_detection(
     camera_index: int = 0,
-    face_detection_model: str = "mtcnn",
+    face_detection_model: str = "mediapipe",
     facial_model: str = "trpakov/vit-face-expression",
     speech_model: str = "superb/wav2vec2-base-superb-er",
     device: str = "cpu",
@@ -799,9 +799,9 @@ def main() -> None:
     parser.add_argument(
         "--face-detection",
         type=str,
-        default="mtcnn",
-        choices=["mtcnn", "retinaface"],
-        help="Face detection model: mtcnn (fast) or retinaface (accurate)",
+        default="mediapipe",
+        choices=["mediapipe", "mediapipe-full"],
+        help="Face detection model: mediapipe (short-range) or mediapipe-full (long-range)",
     )
     parser.add_argument(
         "--facial-model",

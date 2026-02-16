@@ -7,8 +7,7 @@ from emotion_detection_action.core.config import ModelConfig
 from emotion_detection_action.core.types import BoundingBox, FaceDetection
 from emotion_detection_action.detection.face import (
     FaceDetector,
-    MTCNN_AVAILABLE,
-    RETINAFACE_AVAILABLE,
+    MEDIAPIPE_AVAILABLE,
 )
 
 
@@ -17,79 +16,88 @@ class TestFaceDetector:
 
     def test_initialization(self):
         """Test detector initialization."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
-        detector = FaceDetector(config, threshold=0.8)
+        config = ModelConfig(model_id="mediapipe", device="cpu")
+        detector = FaceDetector(config, threshold=0.5)
 
-        assert detector.threshold == 0.8
+        assert detector.threshold == 0.5
         assert detector.max_faces == 5
         assert not detector.is_loaded
 
     def test_initialization_with_custom_params(self):
         """Test detector initialization with custom parameters."""
-        config = ModelConfig(model_id="retinaface", device="cpu")
+        config = ModelConfig(model_id="mediapipe-full", device="cpu")
         detector = FaceDetector(
             config,
-            threshold=0.95,
+            threshold=0.7,
             min_face_size=30,
             max_faces=3,
             return_landmarks=False,
             return_face_images=False,
         )
 
-        assert detector.threshold == 0.95
+        assert detector.threshold == 0.7
         assert detector.min_face_size == 30
         assert detector.max_faces == 3
         assert detector.return_landmarks is False
         assert detector.return_face_images is False
 
-    @pytest.mark.skipif(not MTCNN_AVAILABLE, reason="MTCNN not installed")
-    def test_load_mtcnn(self):
-        """Test loading MTCNN model."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_load_mediapipe_short(self):
+        """Test loading MediaPipe short-range model."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
 
         detector.load()
         assert detector.is_loaded
-        assert detector.model_type == "mtcnn"
+        assert detector.model_type == "mediapipe-short"
 
         detector.unload()
         assert not detector.is_loaded
 
-    @pytest.mark.skipif(not RETINAFACE_AVAILABLE, reason="RetinaFace not installed")
-    def test_load_retinaface(self):
-        """Test loading RetinaFace model."""
-        config = ModelConfig(model_id="retinaface", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_load_mediapipe_full(self):
+        """Test loading MediaPipe full-range model."""
+        config = ModelConfig(model_id="mediapipe-full", device="cpu")
         detector = FaceDetector(config)
 
         detector.load()
         assert detector.is_loaded
-        assert detector.model_type == "retinaface"
+        assert detector.model_type == "mediapipe-full"
 
         detector.unload()
         assert not detector.is_loaded
 
-    def test_load_default_model(self):
-        """Test loading with unknown model defaults to MTCNN."""
-        config = ModelConfig(model_id="unknown_model", device="cpu")
-        detector = FaceDetector(config)
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_load_model_aliases(self):
+        """Test that model aliases work correctly."""
+        aliases = [
+            ("short", "mediapipe-short"),
+            ("short-range", "mediapipe-short"),
+            ("mediapipe-short", "mediapipe-short"),
+            ("full", "mediapipe-full"),
+            ("long-range", "mediapipe-full"),
+            ("mediapipe-full", "mediapipe-full"),
+        ]
 
-        if MTCNN_AVAILABLE:
+        for alias, expected_type in aliases:
+            config = ModelConfig(model_id=alias, device="cpu")
+            detector = FaceDetector(config)
             detector.load()
-            assert detector.model_type == "mtcnn"
+            assert detector.model_type == expected_type, f"Alias {alias} failed"
             detector.unload()
 
     def test_predict_not_loaded_raises(self):
         """Test that predict raises error when model not loaded."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
 
         with pytest.raises(RuntimeError, match="Model not loaded"):
             detector.predict(np.zeros((100, 100, 3), dtype=np.uint8))
 
-    @pytest.mark.skipif(not MTCNN_AVAILABLE, reason="MTCNN not installed")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_predict_empty_image(self):
         """Test prediction on empty/blank image returns no faces."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
         detector.load()
 
@@ -98,14 +106,15 @@ class TestFaceDetector:
         detections = detector.predict(blank_image)
 
         assert isinstance(detections, list)
-        # May or may not detect false positives, just check it doesn't crash
+        # Blank image should have no faces
+        assert len(detections) == 0
 
         detector.unload()
 
-    @pytest.mark.skipif(not MTCNN_AVAILABLE, reason="MTCNN not installed")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_predict_grayscale_image(self):
         """Test prediction on grayscale image."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
         detector.load()
 
@@ -117,10 +126,10 @@ class TestFaceDetector:
 
         detector.unload()
 
-    @pytest.mark.skipif(not MTCNN_AVAILABLE, reason="MTCNN not installed")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_max_faces_limit(self):
         """Test that max_faces parameter limits detections."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config, max_faces=1)
         detector.load()
 
@@ -133,14 +142,24 @@ class TestFaceDetector:
 
         detector.unload()
 
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_context_manager(self):
         """Test FaceDetector as context manager."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+        config = ModelConfig(model_id="mediapipe", device="cpu")
 
-        if MTCNN_AVAILABLE:
-            with FaceDetector(config) as detector:
-                assert detector.is_loaded
-            assert not detector.is_loaded
+        with FaceDetector(config) as detector:
+            assert detector.is_loaded
+        assert not detector.is_loaded
+
+    def test_repr(self):
+        """Test string representation."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
+        detector = FaceDetector(config, threshold=0.6)
+
+        repr_str = repr(detector)
+        assert "FaceDetector" in repr_str
+        assert "mediapipe" in repr_str
+        assert "0.6" in repr_str
 
 
 class TestFaceDetectorHelpers:
@@ -194,31 +213,31 @@ class TestFaceDetectorHelpers:
         assert np.array_equal(result, image)
 
 
-class TestRetinaFaceSpecific:
-    """Tests specific to RetinaFace implementation."""
+class TestMediaPipeSpecific:
+    """Tests specific to MediaPipe implementation."""
 
-    @pytest.mark.skipif(not RETINAFACE_AVAILABLE, reason="RetinaFace not installed")
-    def test_retinaface_landmarks_format(self):
-        """Test that RetinaFace returns landmarks in correct format."""
-        config = ModelConfig(model_id="retinaface", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_mediapipe_landmarks_format(self):
+        """Test that MediaPipe returns landmarks in correct format."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config, return_landmarks=True)
         detector.load()
 
-        # Create test image
+        # Create test image with some texture (more likely to get detections)
         test_image = np.random.randint(100, 200, (480, 640, 3), dtype=np.uint8)
         detections = detector.predict(test_image)
 
         for det in detections:
             if det.landmarks is not None:
-                # RetinaFace should return 5 landmarks: 2 eyes, nose, 2 mouth corners
-                assert det.landmarks.shape == (5, 2)
+                # MediaPipe returns 6 keypoints
+                assert det.landmarks.shape == (6, 2)
 
         detector.unload()
 
-    @pytest.mark.skipif(not RETINAFACE_AVAILABLE, reason="RetinaFace not installed")
-    def test_retinaface_face_image_cropping(self):
-        """Test that RetinaFace correctly crops face images."""
-        config = ModelConfig(model_id="retinaface", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_mediapipe_face_image_cropping(self):
+        """Test that MediaPipe correctly crops face images."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config, return_face_images=True)
         detector.load()
 
@@ -234,44 +253,58 @@ class TestRetinaFaceSpecific:
 
         detector.unload()
 
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_model_selection_parameter(self):
+        """Test model_selection parameter."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
+
+        # Short range (model_selection=0)
+        detector_short = FaceDetector(config, model_selection=0)
+        detector_short.load()
+        assert detector_short.model_type == "mediapipe-short"
+        detector_short.unload()
+
+        # Full range (model_selection=1)
+        detector_full = FaceDetector(config, model_selection=1)
+        detector_full.load()
+        assert detector_full.model_type == "mediapipe-full"
+        detector_full.unload()
+
 
 class TestModelTypeSelection:
-    """Tests for model type selection and switching."""
+    """Tests for model type selection."""
 
-    def test_model_type_property(self):
-        """Test model_type property."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+    def test_model_type_property_default(self):
+        """Test model_type property before loading."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
 
-        # Before loading, default is mtcnn
-        assert detector.model_type == "mtcnn"
+        # Before loading, based on model_selection default (0 = short)
+        assert detector.model_type == "mediapipe-short"
 
-    @pytest.mark.skipif(not MTCNN_AVAILABLE, reason="MTCNN not installed")
-    def test_model_type_after_load_mtcnn(self):
-        """Test model_type is set correctly after loading MTCNN."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
-        detector = FaceDetector(config)
-        detector.load()
-
-        assert detector.model_type == "mtcnn"
-        detector.unload()
-
-    @pytest.mark.skipif(not RETINAFACE_AVAILABLE, reason="RetinaFace not installed")
-    def test_model_type_after_load_retinaface(self):
-        """Test model_type is set correctly after loading RetinaFace."""
-        config = ModelConfig(model_id="retinaface", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_model_type_after_load(self):
+        """Test model_type is set correctly after loading."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
         detector.load()
 
-        assert detector.model_type == "retinaface"
+        assert detector.model_type == "mediapipe-short"
         detector.unload()
 
-    def test_model_type_reset_after_unload(self):
-        """Test model_type resets after unload."""
-        config = ModelConfig(model_id="mtcnn", device="cpu")
+    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
+    def test_detect_and_align(self):
+        """Test detect_and_align method."""
+        config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
+        detector.load()
 
-        if MTCNN_AVAILABLE:
-            detector.load()
-            detector.unload()
-            assert detector.model_type == "mtcnn"  # Reset to default
+        test_image = np.random.randint(100, 200, (480, 640, 3), dtype=np.uint8)
+        results = detector.detect_and_align(test_image, target_size=(224, 224))
+
+        assert isinstance(results, list)
+        for det, aligned in results:
+            assert isinstance(det, FaceDetection)
+            assert aligned.shape == (224, 224, 3)
+
+        detector.unload()

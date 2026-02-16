@@ -26,7 +26,7 @@ from emotion_detection_action.emotion.speech import SpeechEmotionRecognizer
 from emotion_detection_action.inputs.audio import AudioInput
 from emotion_detection_action.inputs.base import AudioChunk, VideoFrame
 from emotion_detection_action.inputs.video import VideoInput
-from emotion_detection_action.models.vla.base import BaseVLAModel, VLAInput
+from emotion_detection_action.models.vla.base import BaseVLAModel
 from emotion_detection_action.models.vla.openvla import OpenVLAModel
 
 
@@ -159,6 +159,8 @@ class EmotionDetector:
             attention_weight=self.config.attention_weight,
             attention_stress_amplification=self.config.attention_stress_amplification,
             attention_engagement_threshold=self.config.attention_engagement_threshold,
+            learned_model_path=self.config.learned_fusion_model_path,
+            learned_model_device=self.config.learned_fusion_device,
         )
 
         # Initialize temporal smoother

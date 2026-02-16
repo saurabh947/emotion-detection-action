@@ -89,19 +89,6 @@ class TestEmotionFusion:
         with pytest.raises(ValueError, match="No emotion results pass confidence threshold"):
             fusion.fuse(facial_result=None, speech_result=None)
 
-    def test_fuse_average_strategy(self):
-        """Test average fusion strategy."""
-        fusion = EmotionFusion(strategy="average")
-        facial = create_facial_result(happy=0.8, sad=0.2)
-        speech = create_speech_result(happy=0.4, sad=0.6)
-
-        result = fusion.fuse(facial, speech)
-
-        # Average of 0.8 and 0.4
-        assert result.emotions.happy == pytest.approx(0.6, abs=0.01)
-        # Average of 0.2 and 0.6
-        assert result.emotions.sad == pytest.approx(0.4, abs=0.01)
-
     def test_fuse_weighted_strategy(self):
         """Test weighted fusion strategy."""
         fusion = EmotionFusion(strategy="weighted", visual_weight=0.6, audio_weight=0.4)
@@ -112,19 +99,6 @@ class TestEmotionFusion:
 
         # 1.0 * 0.6 + 0.0 * 0.4 = 0.6
         assert result.emotions.happy == pytest.approx(0.6, abs=0.01)
-
-    def test_fuse_max_strategy(self):
-        """Test max fusion strategy."""
-        fusion = EmotionFusion(strategy="max")
-        facial = create_facial_result(happy=0.3, sad=0.7)
-        speech = create_speech_result(happy=0.8, sad=0.2)
-
-        result = fusion.fuse(facial, speech)
-
-        # Max is taken for each emotion, then normalized
-        # happy: max(0.3, 0.8) = 0.8, sad: max(0.7, 0.2) = 0.7
-        # Total = 1.5, normalized: happy = 0.53, sad = 0.47
-        assert result.emotions.happy > result.emotions.sad
 
     def test_fuse_confidence_strategy(self):
         """Test confidence-weighted fusion strategy."""
@@ -158,7 +132,7 @@ class TestEmotionFusion:
 
     def test_dominant_emotion_after_fusion(self):
         """Test that dominant emotion is correctly identified after fusion."""
-        fusion = EmotionFusion(strategy="average")
+        fusion = EmotionFusion(strategy="weighted", visual_weight=0.5, audio_weight=0.5)
         facial = create_facial_result(happy=0.6, sad=0.4)
         speech = create_speech_result(happy=0.8, sad=0.2)
 
@@ -219,7 +193,7 @@ class TestFusionEdgeCases:
         facial = create_facial_result(happy=0.5, confidence=0.0)
         speech = create_speech_result(sad=0.5, confidence=0.0)
 
-        # Should fall back to average when both have zero confidence
+        # Should fall back to weighted fusion when both have zero confidence
         result = fusion.fuse(facial, speech)
         assert result is not None
 

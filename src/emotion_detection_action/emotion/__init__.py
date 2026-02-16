@@ -3,6 +3,10 @@
 from emotion_detection_action.emotion.attention import AttentionAnalyzer
 from emotion_detection_action.emotion.facial import FacialEmotionRecognizer
 from emotion_detection_action.emotion.fusion import EmotionFusion
+from emotion_detection_action.emotion.learned_fusion import (
+    LearnedEmotionFusion,
+    LearnedFusionConfig,
+)
 from emotion_detection_action.emotion.speech import SpeechEmotionRecognizer
 
 __all__ = [
@@ -10,5 +14,7 @@ __all__ = [
     "SpeechEmotionRecognizer",
     "EmotionFusion",
     "AttentionAnalyzer",
+    "LearnedEmotionFusion",
+    "LearnedFusionConfig",
 ]
 

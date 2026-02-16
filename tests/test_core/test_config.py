@@ -36,7 +36,8 @@ class TestConfig:
         config = Config()
         assert config.vla_model == "openvla/openvla-7b"
         assert config.device == "cuda"
-        assert config.face_detection_threshold == 0.9
+        assert config.face_detection_threshold == 0.5
+        assert config.face_detection_model == "mediapipe"
 
     def test_invalid_facial_weight(self):
         """Test validation of facial_weight."""
@@ -56,11 +57,6 @@ class TestConfig:
         with pytest.raises(ValueError, match="face_detection_threshold must be between 0 and 1"):
             Config(face_detection_threshold=1.1)
 
-    def test_invalid_voice_activity_threshold(self):
-        """Test validation of voice_activity_threshold."""
-        with pytest.raises(ValueError, match="voice_activity_threshold must be between 0 and 1"):
-            Config(voice_activity_threshold=-0.5)
-
     def test_invalid_vad_aggressiveness(self):
         """Test validation of vad_aggressiveness."""
         with pytest.raises(ValueError, match="vad_aggressiveness must be 0, 1, 2, or 3"):
@@ -71,13 +67,13 @@ class TestConfig:
         config = Config(
             device="cuda",
             dtype="float16",
-            face_detection_model="retinaface",
-            face_detection_threshold=0.85,
+            face_detection_model="mediapipe-full",
+            face_detection_threshold=0.6,
         )
         model_config = config.get_face_detection_config()
-        assert model_config.model_id == "retinaface"
+        assert model_config.model_id == "mediapipe-full"
         assert model_config.device == "cuda"
-        assert model_config.extra_kwargs["threshold"] == 0.85
+        assert model_config.extra_kwargs["threshold"] == 0.6
 
     def test_get_vla_config(self):
         """Test generating VLA model config."""

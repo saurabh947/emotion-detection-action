@@ -370,10 +370,6 @@ class AttentionDetector(BaseModel):
         rate = len(recent_blinks) * (60.0 / window_seconds)
         return rate
 
-    def get_pupil_baseline(self) -> float | None:
-        """Get the established pupil baseline."""
-        return self._state.baseline_pupil
-
     def get_pupil_dilation(self) -> float:
         """Get current pupil dilation relative to baseline.
 
@@ -412,10 +408,6 @@ class AttentionDetector(BaseModel):
         # Typical variance range is 0-0.1 for stable gaze
         stability = 1.0 / (1.0 + variance * 10)
         return float(stability)
-
-    def reset_baseline(self) -> None:
-        """Reset the pupil baseline for recalibration."""
-        self._state.baseline_pupil = None
 
     def __repr__(self) -> str:
         return f"AttentionDetector(loaded={self._is_loaded})"

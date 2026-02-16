@@ -83,7 +83,7 @@ class ROSActionHandler(BaseActionHandler):
         self.action_topic = action_topic
         self.emotion_topic = emotion_topic
         self.queue_size = queue_size
-        self.publish_emotion = publish_emotion
+        self._publish_emotion_enabled = publish_emotion
 
         # Determine ROS version
         if ros_version is not None:
@@ -228,7 +228,7 @@ class ROSActionHandler(BaseActionHandler):
             print(f"ROS publish failed: {e}")
             return False
 
-    def publish_emotion(self, emotion: EmotionResult) -> bool:
+    def _publish_emotion_to_topic(self, emotion: EmotionResult) -> bool:
         """Publish emotion result to ROS topic.
 
         Args:
@@ -279,19 +279,11 @@ class ROSActionHandler(BaseActionHandler):
             True if execution was successful.
         """
         # Publish emotion if enabled
-        if self.publish_emotion and self._emotion_pub is not None:
-            self.publish_emotion(emotion_result)
+        if self._publish_emotion_enabled and self._emotion_pub is not None:
+            self._publish_emotion_to_topic(emotion_result)
 
         # Execute action
         return super().execute_for_emotion(emotion_result, action)
-
-    def spin_once(self) -> None:
-        """Process ROS callbacks once (non-blocking)."""
-        if self.ros_version == 2 and self._node is not None:
-            rclpy.spin_once(self._node, timeout_sec=0.01)
-        elif self.ros_version == 1:
-            # ROS1 doesn't need manual spinning for publishers
-            pass
 
     @staticmethod
     def is_ros_available() -> dict[str, bool]:

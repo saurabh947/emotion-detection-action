@@ -1,9 +1,8 @@
 """Audio input handler for real-time microphone streams."""
 
-import asyncio
 import queue
 import threading
-from typing import Any, AsyncIterator
+from typing import Any
 
 import numpy as np
 
@@ -151,39 +150,6 @@ class AudioInput(BaseInput[AudioChunk]):
             )
         except queue.Empty:
             return None
-
-    async def stream_async(self) -> AsyncIterator[AudioChunk]:
-        """Async generator for streaming audio.
-
-        Yields:
-            Audio chunks from microphone.
-        """
-        while self._is_open:
-            chunk = self.read()
-            if chunk is None:
-                await asyncio.sleep(0.01)
-                continue
-            yield chunk
-
-    @staticmethod
-    def list_devices() -> list[dict[str, Any]]:
-        """List available audio input devices.
-
-        Returns:
-            List of device info dictionaries.
-        """
-        if not SOUNDDEVICE_AVAILABLE:
-            return []
-        return [
-            {
-                "index": i,
-                "name": d["name"],
-                "channels": d["max_input_channels"],
-                "sample_rate": d["default_samplerate"],
-            }
-            for i, d in enumerate(sd.query_devices())
-            if d["max_input_channels"] > 0
-        ]
 
     def __repr__(self) -> str:
         return (

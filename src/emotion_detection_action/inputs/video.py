@@ -1,7 +1,5 @@
 """Video input handler for real-time camera streams."""
 
-from typing import Any
-
 import cv2
 import numpy as np
 
@@ -125,29 +123,6 @@ class VideoInput(BaseInput[VideoFrame]):
             RGB image array.
         """
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    @staticmethod
-    def list_cameras(max_cameras: int = 10) -> list[dict[str, Any]]:
-        """List available cameras.
-
-        Args:
-            max_cameras: Maximum number of cameras to check.
-
-        Returns:
-            List of available camera info dictionaries.
-        """
-        cameras = []
-        for i in range(max_cameras):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                cameras.append({
-                    "index": i,
-                    "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                    "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                    "fps": cap.get(cv2.CAP_PROP_FPS) or 30.0,
-                })
-                cap.release()
-        return cameras
 
     def __repr__(self) -> str:
         return (

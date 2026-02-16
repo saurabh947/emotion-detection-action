@@ -35,7 +35,6 @@ dependencies = [
     "Pillow>=10.0.0",
     "sounddevice>=0.4.6",
     "scipy>=1.11.0",
-    "facenet-pytorch>=2.5.3",
     "webrtcvad>=2.0.10",
     "pydantic>=2.0.0",
     "aiofiles>=23.0.0",
@@ -54,10 +53,6 @@ dev = [
 vla = [
     "accelerate>=0.24.0",
     "bitsandbytes>=0.41.0",
-]
-retinaface = [
-    "retinaface>=0.0.13",
-    "tensorflow>=2.10.0",
 ]
 serial = [
     "pyserial>=3.5",
