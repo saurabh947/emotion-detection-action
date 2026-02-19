@@ -104,6 +104,7 @@ class EmotionSmoother:
             emotions=smoothed_scores,
             facial_result=result.facial_result,
             speech_result=result.speech_result,
+            attention_result=result.attention_result,
             fusion_confidence=result.fusion_confidence,
         )
 

@@ -35,7 +35,7 @@ class EmotionDetector:
 
     This class integrates all components of the emotion detection system:
     - Face detection (MediaPipe)
-    - Voice activity detection (WebRTC VAD)
+    - Voice activity detection (Silero VAD - noise-resistant deep learning)
     - Attention analysis (gaze, pupil dilation, stress/engagement metrics)
     - Facial emotion recognition (ViT model)
     - Speech emotion recognition (Wav2Vec2 model)
@@ -120,22 +120,24 @@ class EmotionDetector:
         self._face_detector.load()
 
         # Initialize voice activity detector
-        vad_config = ModelConfig(model_id="webrtcvad", device="cpu")
-        self._voice_detector = VoiceActivityDetector(
-            vad_config,
-            aggressiveness=self.config.vad_aggressiveness,
-        )
+        vad_config = ModelConfig(model_id="silero-vad", device="cpu")
+        self._voice_detector = VoiceActivityDetector(vad_config)
         self._voice_detector.load()
 
         # Initialize attention detector (if enabled)
         if self.config.attention_analysis_enabled:
             try:
-                attention_config = ModelConfig(model_id="mediapipe", device="cpu")
+                attention_config = ModelConfig(
+                    model_id="mediapipe",
+                    device="cpu",
+                    extra_kwargs={"mediapipe_delegate": self.config.mediapipe_delegate}
+                )
                 self._attention_detector = AttentionDetector(attention_config)
                 self._attention_detector.load()
                 self._attention_analyzer = AttentionAnalyzer(detector=self._attention_detector)
-            except RuntimeError as e:
-                # MediaPipe not available, disable attention analysis
+                if self.config.verbose:
+                    print("Attention analysis initialized successfully")
+            except Exception as e:
                 if self.config.verbose:
                     print(f"Attention analysis disabled: {e}")
                 self._attention_detector = None
@@ -307,18 +309,16 @@ class EmotionDetector:
         if audio_chunk and self._voice_detector:
             voice_detection = self._voice_detector.predict(audio_chunk)
 
-        # Process attention/gaze analysis
+        # Process attention/gaze analysis (only if face detected)
         gaze_detection = None
         attention_result: AttentionResult | None = None
-        if self._attention_detector and self._attention_analyzer:
+        if self._attention_detector and self._attention_analyzer and faces:
             gaze_detection = self._attention_detector.predict(rgb_frame)
             if gaze_detection:
-                # Get metrics from detector
                 blink_rate = self._attention_detector.get_blink_rate()
                 pupil_dilation = self._attention_detector.get_pupil_dilation()
                 gaze_stability = self._attention_detector.get_gaze_stability()
 
-                # Analyze attention
                 attention_result = self._attention_analyzer.analyze(
                     gaze=gaze_detection,
                     blink_rate=blink_rate,

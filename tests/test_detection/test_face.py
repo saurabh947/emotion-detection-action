@@ -42,49 +42,17 @@ class TestFaceDetector:
         assert detector.return_face_images is False
 
     @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
-    def test_load_mediapipe_short(self):
-        """Test loading MediaPipe short-range model."""
+    def test_load_mediapipe(self):
+        """Test loading MediaPipe face detector model."""
         config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
 
         detector.load()
         assert detector.is_loaded
-        assert detector.model_type == "mediapipe-short"
+        assert detector.model_type == "mediapipe-face-detector"
 
         detector.unload()
         assert not detector.is_loaded
-
-    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
-    def test_load_mediapipe_full(self):
-        """Test loading MediaPipe full-range model."""
-        config = ModelConfig(model_id="mediapipe-full", device="cpu")
-        detector = FaceDetector(config)
-
-        detector.load()
-        assert detector.is_loaded
-        assert detector.model_type == "mediapipe-full"
-
-        detector.unload()
-        assert not detector.is_loaded
-
-    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
-    def test_load_model_aliases(self):
-        """Test that model aliases work correctly."""
-        aliases = [
-            ("short", "mediapipe-short"),
-            ("short-range", "mediapipe-short"),
-            ("mediapipe-short", "mediapipe-short"),
-            ("full", "mediapipe-full"),
-            ("long-range", "mediapipe-full"),
-            ("mediapipe-full", "mediapipe-full"),
-        ]
-
-        for alias, expected_type in aliases:
-            config = ModelConfig(model_id=alias, device="cpu")
-            detector = FaceDetector(config)
-            detector.load()
-            assert detector.model_type == expected_type, f"Alias {alias} failed"
-            detector.unload()
 
     def test_predict_not_loaded_raises(self):
         """Test that predict raises error when model not loaded."""
@@ -229,14 +197,14 @@ class TestMediaPipeSpecific:
 
         for det in detections:
             if det.landmarks is not None:
-                # MediaPipe returns 6 keypoints
+                # MediaPipe Tasks API returns 6 keypoints
                 assert det.landmarks.shape == (6, 2)
 
         detector.unload()
 
     @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_mediapipe_face_image_cropping(self):
-        """Test that MediaPipe correctly crops face images."""
+        """Test that MediaPipe Tasks API correctly crops face images."""
         config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config, return_face_images=True)
         detector.load()
@@ -253,44 +221,16 @@ class TestMediaPipeSpecific:
 
         detector.unload()
 
-    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
-    def test_model_selection_parameter(self):
-        """Test model_selection parameter."""
-        config = ModelConfig(model_id="mediapipe", device="cpu")
-
-        # Short range (model_selection=0)
-        detector_short = FaceDetector(config, model_selection=0)
-        detector_short.load()
-        assert detector_short.model_type == "mediapipe-short"
-        detector_short.unload()
-
-        # Full range (model_selection=1)
-        detector_full = FaceDetector(config, model_selection=1)
-        detector_full.load()
-        assert detector_full.model_type == "mediapipe-full"
-        detector_full.unload()
-
 
 class TestModelTypeSelection:
-    """Tests for model type selection."""
+    """Tests for model type property."""
 
-    def test_model_type_property_default(self):
-        """Test model_type property before loading."""
+    def test_model_type_property(self):
+        """Test model_type property."""
         config = ModelConfig(model_id="mediapipe", device="cpu")
         detector = FaceDetector(config)
 
-        # Before loading, based on model_selection default (0 = short)
-        assert detector.model_type == "mediapipe-short"
-
-    @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
-    def test_model_type_after_load(self):
-        """Test model_type is set correctly after loading."""
-        config = ModelConfig(model_id="mediapipe", device="cpu")
-        detector = FaceDetector(config)
-        detector.load()
-
-        assert detector.model_type == "mediapipe-short"
-        detector.unload()
+        assert detector.model_type == "mediapipe-face-detector"
 
     @pytest.mark.skipif(not MEDIAPIPE_AVAILABLE, reason="MediaPipe not installed")
     def test_detect_and_align(self):

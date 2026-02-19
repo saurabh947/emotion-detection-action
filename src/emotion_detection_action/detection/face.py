@@ -1,5 +1,8 @@
 """Face detection module using MediaPipe."""
 
+import tempfile
+import urllib.request
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -8,12 +11,20 @@ from emotion_detection_action.core.config import ModelConfig
 from emotion_detection_action.core.types import BoundingBox, FaceDetection
 from emotion_detection_action.models.base import BaseModel
 
-# Try to import MediaPipe
 try:
     import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+
     MEDIAPIPE_AVAILABLE = True
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
+    mp = None
+    python = None
+    vision = None
+
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+MODEL_NAME = "blaze_face_short_range.tflite"
 
 
 class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
@@ -22,9 +33,7 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
     Detects faces in images and returns bounding boxes, confidence scores,
     and optionally facial landmarks and cropped face images.
 
-    MediaPipe provides two model types:
-    - "short": Optimized for faces within 2 meters of the camera (default)
-    - "full": Optimized for faces within 5 meters of the camera
+    The model is automatically downloaded on first use and cached locally.
 
     Example:
         >>> config = ModelConfig(model_id="mediapipe", device="cpu")
@@ -43,7 +52,6 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
         max_faces: int = 5,
         return_landmarks: bool = True,
         return_face_images: bool = True,
-        model_selection: int = 0,
     ) -> None:
         """Initialize face detector.
 
@@ -54,9 +62,6 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
             max_faces: Maximum number of faces to detect.
             return_landmarks: Whether to return facial landmarks.
             return_face_images: Whether to return cropped face images.
-            model_selection: MediaPipe model selection.
-                0 = short-range (within 2 meters, faster)
-                1 = full-range (within 5 meters, more accurate for distant faces)
         """
         super().__init__(config)
         self.threshold = threshold
@@ -64,7 +69,6 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
         self.max_faces = max_faces
         self.return_landmarks = return_landmarks
         self.return_face_images = return_face_images
-        self.model_selection = model_selection
 
         self._detector: Any = None
 
@@ -78,19 +82,52 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
                 "MediaPipe is not available. Install with: pip install mediapipe"
             )
 
-        # Parse model selection from config if specified
-        model_id = self.config.model_id.lower()
-        if model_id in ("full", "mediapipe-full", "long-range"):
-            self.model_selection = 1
-        elif model_id in ("short", "mediapipe-short", "short-range", "mediapipe"):
-            self.model_selection = 0
+        model_path = self._get_or_download_model()
 
-        self._detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=self.model_selection,
+        base_options = python.BaseOptions(model_asset_path=str(model_path))
+        options = vision.FaceDetectorOptions(
+            base_options=base_options,
             min_detection_confidence=self.threshold,
         )
 
+        self._detector = vision.FaceDetector.create_from_options(options)
         self._is_loaded = True
+
+    def _get_or_download_model(self) -> Path:
+        """Get the face detection model file, downloading if necessary."""
+        cache_locations = [
+            Path.home() / ".cache" / "emotion_detection_action" / "models",
+            Path(tempfile.gettempdir()) / "emotion_detection_action" / "models",
+        ]
+
+        cache_dir = None
+        model_path = None
+
+        for loc in cache_locations:
+            try:
+                loc.mkdir(parents=True, exist_ok=True)
+                model_path = loc / MODEL_NAME
+                cache_dir = loc
+                break
+            except (PermissionError, OSError):
+                continue
+
+        if cache_dir is None:
+            raise RuntimeError(
+                "Unable to create cache directory for MediaPipe models. "
+                "Please ensure write access to ~/.cache or system temp directory."
+            )
+
+        if not model_path.exists():
+            try:
+                urllib.request.urlretrieve(MODEL_URL, model_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to download MediaPipe face detection model: {e}\n"
+                    f"You can manually download from {MODEL_URL} and place at {model_path}"
+                ) from e
+
+        return model_path
 
     def unload(self) -> None:
         """Unload the model."""
@@ -101,8 +138,8 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
 
     @property
     def model_type(self) -> str:
-        """Get the currently loaded model type."""
-        return "mediapipe-short" if self.model_selection == 0 else "mediapipe-full"
+        """Get the model type identifier."""
+        return "mediapipe-face-detector"
 
     def predict(self, input_data: np.ndarray) -> list[FaceDetection]:
         """Detect faces in an image.
@@ -122,25 +159,22 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
         if self._detector is None:
             return []
 
-        # Ensure RGB format
         if len(input_data.shape) == 2:
-            # Grayscale, convert to RGB
             input_data = np.stack([input_data] * 3, axis=-1)
 
         h, w = input_data.shape[:2]
 
-        # Process with MediaPipe
-        results = self._detector.process(input_data)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=input_data)
+        result = self._detector.detect(mp_image)
 
-        if not results.detections:
+        if not result.detections:
             return []
 
         detections = []
 
-        # Sort by confidence to get highest confidence faces first
         sorted_detections = sorted(
-            results.detections,
-            key=lambda d: d.score[0] if d.score else 0,
+            result.detections,
+            key=lambda d: d.categories[0].score if d.categories else 0,
             reverse=True,
         )
 
@@ -148,20 +182,16 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
             if len(detections) >= self.max_faces:
                 break
 
-            score = detection.score[0] if detection.score else 0
+            score = detection.categories[0].score if detection.categories else 0
             if score < self.threshold:
                 continue
 
-            # Get bounding box
-            bbox_data = detection.location_data.relative_bounding_box
+            bbox_data = detection.bounding_box
+            x1 = int(bbox_data.origin_x)
+            y1 = int(bbox_data.origin_y)
+            box_w = int(bbox_data.width)
+            box_h = int(bbox_data.height)
 
-            # Convert relative coordinates to absolute
-            x1 = int(bbox_data.xmin * w)
-            y1 = int(bbox_data.ymin * h)
-            box_w = int(bbox_data.width * w)
-            box_h = int(bbox_data.height * h)
-
-            # Clamp to image bounds
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(w, x1 + box_w)
@@ -169,7 +199,6 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
             box_w = x2 - x1
             box_h = y2 - y1
 
-            # Check minimum face size
             if box_w < self.min_face_size or box_h < self.min_face_size:
                 continue
 
@@ -180,17 +209,12 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
                 height=box_h,
             )
 
-            # Get landmarks if available and requested
-            # MediaPipe provides 6 keypoints: right eye, left eye, nose tip,
-            # mouth center, right ear tragion, left ear tragion
             face_landmarks = None
-            if self.return_landmarks and detection.location_data.relative_keypoints:
-                keypoints = detection.location_data.relative_keypoints
+            if self.return_landmarks and detection.keypoints:
                 face_landmarks = np.array([
-                    [kp.x * w, kp.y * h] for kp in keypoints
+                    [kp.x * w, kp.y * h] for kp in detection.keypoints
                 ])
 
-            # Crop face image if requested
             face_image = None
             if self.return_face_images:
                 face_image = input_data[y1:y2, x1:x2].copy()
@@ -257,7 +281,6 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
             x1, y1, x2, y2 = det.bbox.to_xyxy()
             cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-            # Draw confidence
             label = f"{det.confidence:.2f}"
             cv2.putText(
                 result,

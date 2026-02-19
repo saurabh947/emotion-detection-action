@@ -1,7 +1,10 @@
 """Attention detection using MediaPipe Face Mesh for eye/gaze tracking."""
 
+import tempfile
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -10,12 +13,20 @@ from emotion_detection_action.core.config import ModelConfig
 from emotion_detection_action.core.types import EyeDetection, GazeDetection
 from emotion_detection_action.models.base import BaseModel
 
-# Try to import mediapipe
 try:
     import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+
     MEDIAPIPE_AVAILABLE = True
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
+    mp = None
+    python = None
+    vision = None
+
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
+MODEL_NAME = "face_landmarker.task"
 
 
 # MediaPipe Face Mesh landmark indices for eyes
@@ -46,13 +57,22 @@ class EyeTrackingState:
 class AttentionDetector(BaseModel):
     """Detects eye gaze, pupil size, and attention metrics using MediaPipe.
 
-    This detector uses MediaPipe Face Mesh to track:
+    This detector uses MediaPipe Face Landmarker to track:
     - Eye landmarks and iris position
     - Estimated pupil size (relative)
     - Gaze direction
     - Blink detection
 
+    The detector can use CPU or GPU acceleration via the `mediapipe_delegate`
+    config option. CPU is more stable but slower, GPU is faster but may fail
+    on some systems (especially macOS with Metal).
+
     Example:
+        >>> config = ModelConfig(
+        ...     model_id="mediapipe",
+        ...     device="cpu",
+        ...     extra_kwargs={"mediapipe_delegate": "cpu"}
+        ... )
         >>> detector = AttentionDetector(config)
         >>> detector.load()
         >>> gaze = detector.predict(rgb_frame)
@@ -63,14 +83,18 @@ class AttentionDetector(BaseModel):
         self,
         config: ModelConfig,
         history_size: int = 30,
-        blink_threshold: float = 0.2,
+        blink_threshold: float = 0.45,
     ) -> None:
         """Initialize attention detector.
 
         Args:
             config: Model configuration.
             history_size: Number of frames to keep in history for smoothing.
-            blink_threshold: Eye openness threshold for blink detection.
+            blink_threshold: Normalized eye-openness threshold for blink
+                detection.  Values below this are considered "closed".
+                Raw EAR is normalised by dividing by 0.3 (typical open-eye
+                EAR), so 0.45 corresponds to a raw EAR of ~0.135, which
+                captures normal blinks that briefly dip to 0.05-0.15.
         """
         super().__init__(config)
         self._face_mesh: Any = None
@@ -85,19 +109,77 @@ class AttentionDetector(BaseModel):
         )
 
     def load(self) -> None:
-        """Load the MediaPipe Face Mesh model."""
+        """Load the MediaPipe Face Landmarker model."""
+        if self._is_loaded:
+            return
+
         if not MEDIAPIPE_AVAILABLE:
             raise RuntimeError(
                 "MediaPipe is not available. Install with: pip install mediapipe"
             )
 
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,  # Enables iris landmarks
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+        model_path = self._get_or_download_model()
+
+        # Get delegate from config (default to CPU for stability)
+        delegate_str = self.config.extra_kwargs.get("mediapipe_delegate", "cpu")
+        if delegate_str.lower() == "gpu":
+            delegate = python.BaseOptions.Delegate.GPU
+        else:
+            delegate = python.BaseOptions.Delegate.CPU
+
+        base_options = python.BaseOptions(
+            model_asset_path=str(model_path),
+            delegate=delegate
         )
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,  # IMAGE mode for frame-by-frame
+            num_faces=1,
+            min_face_detection_confidence=0.3,
+            min_face_presence_confidence=0.3,
+            min_tracking_confidence=0.3,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+        )
+
+        self._face_mesh = vision.FaceLandmarker.create_from_options(options)
         self._is_loaded = True
+
+    def _get_or_download_model(self) -> Path:
+        """Get the face landmarker model file, downloading if necessary."""
+        cache_locations = [
+            Path.home() / ".cache" / "emotion_detection_action" / "models",
+            Path(tempfile.gettempdir()) / "emotion_detection_action" / "models",
+        ]
+
+        cache_dir = None
+        model_path = None
+
+        for loc in cache_locations:
+            try:
+                loc.mkdir(parents=True, exist_ok=True)
+                model_path = loc / MODEL_NAME
+                cache_dir = loc
+                break
+            except (PermissionError, OSError):
+                continue
+
+        if cache_dir is None:
+            raise RuntimeError(
+                "Unable to create cache directory for MediaPipe models. "
+                "Please ensure write access to ~/.cache or system temp directory."
+            )
+
+        if not model_path.exists():
+            try:
+                urllib.request.urlretrieve(MODEL_URL, model_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to download MediaPipe face landmarker model: {e}\n"
+                    f"You can manually download from {MODEL_URL} and place at {model_path}"
+                ) from e
+
+        return model_path
 
     def unload(self) -> None:
         """Unload the model."""
@@ -127,13 +209,18 @@ class AttentionDetector(BaseModel):
         if not self._is_loaded or self._face_mesh is None:
             raise RuntimeError("Model not loaded. Call load() first.")
 
-        # Process with MediaPipe
-        results = self._face_mesh.process(image)
+        # mp.Image wraps the array without copying; other MediaPipe tasks
+        # running on the same frame may have mutated the pixel data in-place,
+        # so we must work on our own copy.
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(image))
 
-        if not results.multi_face_landmarks:
+        # Detect face landmarks
+        result = self._face_mesh.detect(mp_image)
+
+        if not result.face_landmarks:
             return None
 
-        landmarks = results.multi_face_landmarks[0]
+        landmarks = result.face_landmarks[0]
         h, w = image.shape[:2]
 
         # Extract eye detections
@@ -170,7 +257,7 @@ class AttentionDetector(BaseModel):
 
     def _extract_eye(
         self,
-        landmarks: Any,
+        landmarks: list,
         width: int,
         height: int,
         is_left: bool,
@@ -178,7 +265,7 @@ class AttentionDetector(BaseModel):
         """Extract eye detection from landmarks.
 
         Args:
-            landmarks: MediaPipe face landmarks.
+            landmarks: List of MediaPipe face landmarks.
             width: Image width.
             height: Image height.
             is_left: Whether to extract left eye (True) or right eye (False).
@@ -200,14 +287,14 @@ class AttentionDetector(BaseModel):
         # Get eye landmarks
         eye_points = []
         for idx in eye_indices:
-            lm = landmarks.landmark[idx]
+            lm = landmarks[idx]
             eye_points.append([lm.x * width, lm.y * height])
         eye_points = np.array(eye_points)
 
         # Get iris landmarks for pupil estimation
         iris_points = []
         for idx in iris_indices:
-            lm = landmarks.landmark[idx]
+            lm = landmarks[idx]
             iris_points.append([lm.x * width, lm.y * height])
         iris_points = np.array(iris_points)
 
@@ -215,8 +302,8 @@ class AttentionDetector(BaseModel):
         center = (float(np.mean(iris_points[:, 0])), float(np.mean(iris_points[:, 1])))
 
         # Estimate pupil size from iris diameter (normalized by eye width)
-        inner_corner = landmarks.landmark[inner_idx]
-        outer_corner = landmarks.landmark[outer_idx]
+        inner_corner = landmarks[inner_idx]
+        outer_corner = landmarks[outer_idx]
         eye_width = np.sqrt(
             (outer_corner.x - inner_corner.x) ** 2 +
             (outer_corner.y - inner_corner.y) ** 2
@@ -266,7 +353,7 @@ class AttentionDetector(BaseModel):
 
     def _calculate_gaze_direction(
         self,
-        landmarks: Any,
+        landmarks: list,
         width: int,
         height: int,
     ) -> tuple[float, float]:
@@ -275,7 +362,7 @@ class AttentionDetector(BaseModel):
         Uses iris position relative to eye corners to estimate gaze.
 
         Args:
-            landmarks: MediaPipe face landmarks.
+            landmarks: List of MediaPipe face landmarks.
             width: Image width.
             height: Image height.
 
@@ -285,21 +372,21 @@ class AttentionDetector(BaseModel):
         # Get iris centers
         left_iris = []
         for idx in LEFT_IRIS_INDICES:
-            lm = landmarks.landmark[idx]
+            lm = landmarks[idx]
             left_iris.append([lm.x, lm.y])
         left_iris = np.mean(left_iris, axis=0)
 
         right_iris = []
         for idx in RIGHT_IRIS_INDICES:
-            lm = landmarks.landmark[idx]
+            lm = landmarks[idx]
             right_iris.append([lm.x, lm.y])
         right_iris = np.mean(right_iris, axis=0)
 
         # Get eye corners for reference
-        left_inner = landmarks.landmark[LEFT_EYE_INNER]
-        left_outer = landmarks.landmark[LEFT_EYE_OUTER]
-        right_inner = landmarks.landmark[RIGHT_EYE_INNER]
-        right_outer = landmarks.landmark[RIGHT_EYE_OUTER]
+        left_inner = landmarks[LEFT_EYE_INNER]
+        left_outer = landmarks[LEFT_EYE_OUTER]
+        right_inner = landmarks[RIGHT_EYE_INNER]
+        right_outer = landmarks[RIGHT_EYE_OUTER]
 
         # Calculate iris position relative to eye (0 = inner corner, 1 = outer corner)
         left_eye_width = left_outer.x - left_inner.x
@@ -315,7 +402,7 @@ class AttentionDetector(BaseModel):
             gaze_x = 0.0
 
         # Vertical gaze (simplified - based on iris vertical position)
-        nose_tip = landmarks.landmark[1]
+        nose_tip = landmarks[1]
         avg_iris_y = (left_iris[1] + right_iris[1]) / 2
         gaze_y = (avg_iris_y - nose_tip.y) * 5  # Scale factor
 

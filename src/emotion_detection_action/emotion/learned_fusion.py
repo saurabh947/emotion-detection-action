@@ -166,11 +166,20 @@ class LearnedEmotionFusion:
     This class wraps the FusionMLP model and provides a simple interface
     for fusing facial, speech, and attention emotion signals.
 
+    When a trained model file is provided, the MLP is used for inference.
+    Otherwise, a deterministic weighted average is used as a reliable
+    out-of-the-box fallback (60% facial, 40% speech, attention modulation).
+
     Example:
         >>> fusion = LearnedEmotionFusion(model_path="models/fusion_mlp.pt")
         >>> result = fusion.fuse(facial_result, speech_result, attention_result)
         >>> print(result.dominant_emotion)
     """
+
+    FACIAL_WEIGHT = 0.6
+    SPEECH_WEIGHT = 0.4
+    NEGATIVE_EMOTIONS = {"angry", "fearful", "sad", "disgusted"}
+    POSITIVE_EMOTIONS = {"happy", "neutral", "surprised"}
 
     def __init__(
         self,
@@ -201,98 +210,46 @@ class LearnedEmotionFusion:
 
         self.device = self.config.device
         self._model: FusionMLP | None = None
+        self._has_trained_model = False
         self._initialized = False
 
     def load(self) -> None:
         """Load the model weights.
 
-        If a model path is provided and exists, loads the trained weights.
-        Otherwise, initializes with default weights that approximate a
-        sensible weighted average fusion (60% facial, 40% speech).
+        If a model path is provided and exists, loads the trained weights
+        and uses the MLP for inference.  Otherwise, marks the fusion as
+        using the deterministic weighted-average fallback.
         """
-        self._model = FusionMLP(
-            hidden_dims=self.config.hidden_dims,
-            dropout=self.config.dropout,
-            output_confidence=self.config.confidence_output,
-        )
-
         if self.config.model_path and Path(self.config.model_path).exists():
+            self._model = FusionMLP(
+                hidden_dims=self.config.hidden_dims,
+                dropout=self.config.dropout,
+                output_confidence=self.config.confidence_output,
+            )
             state_dict = torch.load(
                 self.config.model_path,
                 map_location=self.device,
                 weights_only=True,
             )
             self._model.load_state_dict(state_dict)
+            self._model.to(self.device)
+            self._model.eval()
+            self._has_trained_model = True
         else:
-            # Initialize with sensible default weights
-            self._initialize_default_weights()
+            self._has_trained_model = False
 
-        self._model.to(self.device)
-        self._model.eval()
         self._initialized = True
-
-    def _initialize_default_weights(self) -> None:
-        """Initialize model with sensible default weights.
-
-        This creates a model that approximates weighted average fusion:
-        - 60% weight to facial emotions
-        - 40% weight to speech emotions
-        - Attention metrics provide minor modulation
-
-        This allows the model to work out-of-the-box without training,
-        while still being trainable for better performance.
-        """
-        assert self._model is not None
-
-        with torch.no_grad():
-            # Initialize all layers with small random weights first
-            for module in self._model.modules():
-                if isinstance(module, nn.Linear):
-                    nn.init.xavier_uniform_(module.weight, gain=0.1)
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-
-            # Get the first linear layer (input layer)
-            first_layer = self._model.feature_extractor[0]
-            if isinstance(first_layer, nn.Linear):
-                # Input structure: [facial(7), speech(7), attention(3)] = 17
-                # Set weights so facial has ~60% influence, speech ~40%
-
-                # Scale down all weights first
-                first_layer.weight.data *= 0.1
-
-                # Boost facial emotion connections (indices 0-6)
-                first_layer.weight.data[:, 0:7] *= 6.0  # 60% influence
-
-                # Boost speech emotion connections (indices 7-13)
-                first_layer.weight.data[:, 7:14] *= 4.0  # 40% influence
-
-                # Attention metrics (indices 14-16) keep small influence
-                first_layer.weight.data[:, 14:17] *= 1.0
-
-            # Initialize output layer to pass through emotion signals
-            output_layer = self._model.output_layer
-            if isinstance(output_layer, nn.Linear):
-                # Create identity-like mapping for emotion outputs
-                nn.init.zeros_(output_layer.weight)
-                nn.init.zeros_(output_layer.bias)
-
-                # Set small positive bias for neutral emotion as default
-                output_layer.bias.data[4] = 0.5  # neutral index
-
-                # Confidence output (index 7) - default to moderate confidence
-                if self._model.output_confidence:
-                    output_layer.bias.data[7] = 0.5
 
     def unload(self) -> None:
         """Unload the model to free memory."""
         self._model = None
+        self._has_trained_model = False
         self._initialized = False
 
     @property
     def is_loaded(self) -> bool:
-        """Check if model is loaded."""
-        return self._initialized and self._model is not None
+        """Check if fusion is ready."""
+        return self._initialized
 
     def fuse(
         self,
@@ -301,7 +258,11 @@ class LearnedEmotionFusion:
         attention_result: AttentionResult | None = None,
         timestamp: float = 0.0,
     ) -> EmotionResult:
-        """Fuse emotion results using the learned model.
+        """Fuse emotion results.
+
+        Uses the trained MLP when available, otherwise falls back to a
+        deterministic weighted average (60% facial, 40% speech) with
+        attention-based modulation.
 
         Args:
             facial_result: Facial emotion recognition result.
@@ -313,15 +274,36 @@ class LearnedEmotionFusion:
             Fused emotion result.
 
         Raises:
-            RuntimeError: If model is not loaded.
             ValueError: If no valid inputs are provided.
         """
         if not self.is_loaded:
             self.load()
 
+        has_facial = facial_result is not None
+        has_speech = speech_result is not None
+
+        if not has_facial and not has_speech:
+            raise ValueError("At least one of facial or speech result is required")
+
+        if self._has_trained_model and self._model is not None:
+            return self._fuse_with_mlp(
+                facial_result, speech_result, attention_result, timestamp
+            )
+
+        return self._fuse_weighted_average(
+            facial_result, speech_result, attention_result, timestamp
+        )
+
+    def _fuse_with_mlp(
+        self,
+        facial_result: FacialEmotionResult | None,
+        speech_result: SpeechEmotionResult | None,
+        attention_result: AttentionResult | None,
+        timestamp: float,
+    ) -> EmotionResult:
+        """Fuse using the trained MLP model."""
         assert self._model is not None
 
-        # Convert inputs to tensors
         facial_vec = self._emotion_result_to_tensor(
             facial_result.emotions if facial_result else None
         )
@@ -330,15 +312,6 @@ class LearnedEmotionFusion:
         )
         attention_vec = self._attention_to_tensor(attention_result)
 
-        # Check if we have any valid input
-        has_facial = facial_result is not None
-        has_speech = speech_result is not None
-        has_attention = attention_result is not None and attention_result.confidence > 0
-
-        if not has_facial and not has_speech:
-            raise ValueError("At least one of facial or speech result is required")
-
-        # Run inference
         with torch.no_grad():
             emotion_probs, confidence = self._model(
                 facial_vec.unsqueeze(0),
@@ -346,7 +319,6 @@ class LearnedEmotionFusion:
                 attention_vec.unsqueeze(0),
             )
 
-        # Convert output to EmotionScores
         probs = emotion_probs.squeeze(0).cpu().numpy()
         emotions_dict = {
             emotion: float(probs[i])
@@ -354,17 +326,10 @@ class LearnedEmotionFusion:
         }
         emotions = EmotionScores.from_dict(emotions_dict)
 
-        # Get confidence
         if confidence is not None:
             fusion_confidence = float(confidence.squeeze().cpu().numpy())
         else:
-            # Fallback: use average of input confidences
-            confidences = []
-            if facial_result:
-                confidences.append(facial_result.confidence)
-            if speech_result:
-                confidences.append(speech_result.confidence)
-            fusion_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+            fusion_confidence = self._compute_confidence(facial_result, speech_result)
 
         return EmotionResult(
             timestamp=timestamp,
@@ -374,6 +339,109 @@ class LearnedEmotionFusion:
             attention_result=attention_result,
             fusion_confidence=fusion_confidence,
         )
+
+    def _fuse_weighted_average(
+        self,
+        facial_result: FacialEmotionResult | None,
+        speech_result: SpeechEmotionResult | None,
+        attention_result: AttentionResult | None,
+        timestamp: float,
+    ) -> EmotionResult:
+        """Fuse using deterministic weighted average with attention modulation."""
+        facial_scores = self._scores_to_array(
+            facial_result.emotions if facial_result else None
+        )
+        speech_scores = self._scores_to_array(
+            speech_result.emotions if speech_result else None
+        )
+
+        has_facial = facial_result is not None
+        has_speech = speech_result is not None
+
+        if has_facial and has_speech:
+            fused = self.FACIAL_WEIGHT * facial_scores + self.SPEECH_WEIGHT * speech_scores
+        elif has_facial:
+            fused = facial_scores
+        else:
+            fused = speech_scores
+
+        has_attention = attention_result is not None and attention_result.confidence > 0
+        if has_attention:
+            fused = self._apply_attention_modulation(fused, attention_result)
+
+        total = fused.sum()
+        if total > 0:
+            fused = fused / total
+
+        emotions_dict = {
+            emotion: float(fused[i])
+            for i, emotion in enumerate(EMOTION_ORDER)
+        }
+        emotions = EmotionScores.from_dict(emotions_dict)
+
+        fusion_confidence = self._compute_confidence(facial_result, speech_result)
+
+        return EmotionResult(
+            timestamp=timestamp,
+            emotions=emotions,
+            facial_result=facial_result,
+            speech_result=speech_result,
+            attention_result=attention_result,
+            fusion_confidence=fusion_confidence,
+        )
+
+    def _apply_attention_modulation(
+        self,
+        scores: np.ndarray,
+        attention_result: AttentionResult,
+    ) -> np.ndarray:
+        """Modulate emotion scores based on attention metrics.
+
+        High stress/nervousness slightly boosts negative emotions;
+        high engagement slightly boosts positive emotions.
+        The modulation is deliberately subtle (up to +/- 15%) so the
+        primary signal (facial + speech) remains dominant.
+        """
+        stress = attention_result.metrics.stress_score
+        nervousness = attention_result.metrics.nervousness_score
+        engagement = attention_result.metrics.engagement_score
+
+        negative_boost = 1.0 + 0.15 * max(stress, nervousness)
+        positive_boost = 1.0 + 0.15 * engagement
+
+        modulated = scores.copy()
+        for i, emotion in enumerate(EMOTION_ORDER):
+            if emotion in self.NEGATIVE_EMOTIONS:
+                modulated[i] *= negative_boost
+            elif emotion in self.POSITIVE_EMOTIONS:
+                modulated[i] *= positive_boost
+
+        return modulated
+
+    @staticmethod
+    def _compute_confidence(
+        facial_result: FacialEmotionResult | None,
+        speech_result: SpeechEmotionResult | None,
+    ) -> float:
+        """Compute fusion confidence from input confidences."""
+        confidences: list[float] = []
+        if facial_result is not None:
+            confidences.append(facial_result.confidence)
+        if speech_result is not None:
+            confidences.append(speech_result.confidence)
+        if not confidences:
+            return 0.5
+        avg = sum(confidences) / len(confidences)
+        modality_bonus = min(0.1, 0.1 * (len(confidences) - 1))
+        return min(1.0, avg + modality_bonus)
+
+    @staticmethod
+    def _scores_to_array(emotions: EmotionScores | None) -> np.ndarray:
+        """Convert EmotionScores to a numpy array in EMOTION_ORDER."""
+        if emotions is None:
+            return np.zeros(len(EMOTION_ORDER), dtype=np.float64)
+        scores_dict = emotions.to_dict()
+        return np.array([scores_dict.get(e, 0.0) for e in EMOTION_ORDER], dtype=np.float64)
 
     def _emotion_result_to_tensor(
         self,
@@ -393,7 +461,6 @@ class LearnedEmotionFusion:
     ) -> "torch.Tensor":
         """Convert AttentionResult to tensor."""
         if attention is None or attention.confidence == 0:
-            # Default values when no attention data
             return torch.tensor(
                 [0.0, 0.5, 0.0],  # [stress, engagement, nervousness]
                 dtype=torch.float32,

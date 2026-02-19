@@ -44,21 +44,16 @@ class TestConfig:
         with pytest.raises(ValueError, match="face_detection_threshold must be between 0 and 1"):
             Config(face_detection_threshold=1.1)
 
-    def test_invalid_vad_aggressiveness(self):
-        """Test validation of vad_aggressiveness."""
-        with pytest.raises(ValueError, match="vad_aggressiveness must be 0, 1, 2, or 3"):
-            Config(vad_aggressiveness=5)
-
     def test_get_face_detection_config(self):
         """Test generating face detection model config."""
         config = Config(
             device="cuda",
             dtype="float16",
-            face_detection_model="mediapipe-full",
+            face_detection_model="mediapipe",
             face_detection_threshold=0.6,
         )
         model_config = config.get_face_detection_config()
-        assert model_config.model_id == "mediapipe-full"
+        assert model_config.model_id == "mediapipe"
         assert model_config.device == "cuda"
         assert model_config.extra_kwargs["threshold"] == 0.6
 

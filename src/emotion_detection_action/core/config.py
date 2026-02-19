@@ -37,12 +37,11 @@ class Config:
     dtype: str = "float16"  # "float16", "float32", "bfloat16"
 
     # Face detection settings (MediaPipe)
-    face_detection_model: str = "mediapipe"  # "mediapipe" (short-range) or "mediapipe-full" (long-range)
-    face_detection_threshold: float = 0.5  # MediaPipe confidence threshold
+    face_detection_model: str = "mediapipe"  # MediaPipe face detector
+    face_detection_threshold: float = 0.5  # Detection confidence threshold
     face_min_size: int = 20
 
     # Voice activity detection settings
-    vad_aggressiveness: int = 2  # 0-3, higher = more aggressive filtering
     sample_rate: int = 16000
 
     # Emotion model settings
@@ -64,6 +63,7 @@ class Config:
 
     # Attention analysis settings
     attention_analysis_enabled: bool = True  # Enable attention/gaze analysis
+    mediapipe_delegate: Literal["cpu", "gpu"] = "cpu"  # MediaPipe acceleration: "cpu" or "gpu"
 
     # Performance settings
     max_faces: int = 5  # Maximum faces to process per frame
@@ -78,10 +78,6 @@ class Config:
         # Validate thresholds
         if not (0 <= self.face_detection_threshold <= 1):
             raise ValueError("face_detection_threshold must be between 0 and 1")
-
-        # Validate VAD aggressiveness
-        if self.vad_aggressiveness not in (0, 1, 2, 3):
-            raise ValueError("vad_aggressiveness must be 0, 1, 2, or 3")
 
         # Validate smoothing settings
         if self.smoothing_window < 1:

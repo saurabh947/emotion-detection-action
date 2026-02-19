@@ -24,9 +24,9 @@ Attention analysis metrics:
     - Engagement: Based on eye contact and fixation stability
     - Nervousness: Based on gaze aversion and instability
 
-Face detection models (MediaPipe):
-    - mediapipe: Short-range model, optimized for faces within 2 meters (default)
-    - mediapipe-full: Full-range model, optimized for faces within 5 meters
+Face detection (MediaPipe):
+    The SDK uses MediaPipe Tasks API for face detection, automatically downloading
+    the model (~200KB) on first use.
 
 Temporal smoothing strategies:
     - none: No smoothing (raw per-frame output)
@@ -38,13 +38,12 @@ Requirements:
     - Webcam connected to the system
     - Microphone connected to the system
     - OpenCV for visualization
-    - PyTorch (for ML-based fusion)
-    - MediaPipe (for attention analysis)
+    - PyTorch (for ML-based fusion and Silero VAD)
+    - MediaPipe (for face detection and attention analysis)
 
 Usage:
     python realtime_multimodal.py
     python realtime_multimodal.py --camera 1  # Use different camera
-    python realtime_multimodal.py --face-detection mediapipe-full  # Use full-range model
     python realtime_multimodal.py --smoothing ema --smoothing-alpha 0.2  # Smoother output
     python realtime_multimodal.py --no-attention  # Disable attention analysis
 """
@@ -247,7 +246,10 @@ class MultimodalDisplay:
 
         # Draw gaze direction indicator if attention is being tracked
         if attention_state.eye_detected:
-            self._draw_gaze_indicator(display, attention_state)
+            face_bbox = None
+            if faces:
+                face_bbox = faces[0].bbox.to_xyxy()
+            self._draw_gaze_indicator(display, attention_state, face_bbox)
 
         # Draw face detection status and label
         self._draw_face_overlay(display)
@@ -272,20 +274,36 @@ class MultimodalDisplay:
 
         return cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) >= 1
 
-    def _draw_gaze_indicator(self, frame: np.ndarray, attention: AttentionState) -> None:
-        """Draw a gaze direction indicator on the frame."""
+    def _draw_gaze_indicator(
+        self,
+        frame: np.ndarray,
+        attention: AttentionState,
+        face_bbox: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        """Draw a gaze direction indicator on the frame.
+
+        Args:
+            frame: The video frame to draw on.
+            attention: Current attention state with gaze direction.
+            face_bbox: Optional (x1, y1, x2, y2) face bounding box used
+                to anchor the indicator to the detected face.
+        """
         h, w = frame.shape[:2]
-        center_x, center_y = w // 2, h // 2
 
-        # Gaze direction (-1 to 1) maps to screen
+        if face_bbox is not None:
+            x1, y1, x2, y2 = face_bbox
+            origin_x = (x1 + x2) // 2
+            origin_y = y1 + (y2 - y1) // 4  # ~eye level (upper quarter of face)
+        else:
+            origin_x, origin_y = w // 2, h // 3
+
         gx, gy = attention.gaze_direction
-        target_x = int(center_x + gx * (w // 4))
-        target_y = int(center_y + gy * (h // 4))
+        target_x = int(origin_x + gx * (w // 4))
+        target_y = int(origin_y + gy * (h // 4))
 
-        # Draw gaze target
         color = (0, 255, 255) if attention.engagement_score > 0.5 else (0, 165, 255)
         cv2.circle(frame, (target_x, target_y), 10, color, 2)
-        cv2.line(frame, (center_x, center_y - 100), (target_x, target_y), color, 1)
+        cv2.line(frame, (origin_x, origin_y), (target_x, target_y), color, 1)
 
     def _draw_face_overlay(self, frame: np.ndarray) -> None:
         """Draw face detection and emotion on the video."""
@@ -803,8 +821,7 @@ def main() -> None:
         "--face-detection",
         type=str,
         default="mediapipe",
-        choices=["mediapipe", "mediapipe-full"],
-        help="Face detection model: mediapipe (short-range) or mediapipe-full (long-range)",
+        help="Face detection model (mediapipe)",
     )
     parser.add_argument(
         "--facial-model",

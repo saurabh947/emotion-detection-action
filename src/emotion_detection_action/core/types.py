@@ -68,17 +68,6 @@ class VoiceDetection:
 
 
 @dataclass
-class DetectionResult:
-    """Combined detection results for a frame/segment."""
-
-    timestamp: float
-    faces: list[FaceDetection] = field(default_factory=list)
-    voice: VoiceDetection | None = None
-    gaze: GazeDetection | None = None
-    frame: np.ndarray | None = None  # Original frame if available
-
-
-@dataclass
 class EmotionScores:
     """Emotion probability scores."""
 
@@ -162,6 +151,17 @@ class GazeDetection:
         if self.right_eye:
             openness.append(self.right_eye.openness)
         return sum(openness) / len(openness) if openness else 1.0
+
+
+@dataclass
+class DetectionResult:
+    """Combined detection results for a frame/segment."""
+
+    timestamp: float
+    faces: list[FaceDetection] = field(default_factory=list)
+    voice: VoiceDetection | None = None
+    gaze: GazeDetection | None = None
+    frame: np.ndarray | None = None  # Original frame if available
 
 
 @dataclass

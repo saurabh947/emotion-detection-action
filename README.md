@@ -22,7 +22,7 @@ Press **ESC** or **Q** to quit the demo.
 
 - **Real-time emotion detection**: Live webcam + microphone processing
 - **Face detection**: Automatic face detection using MediaPipe (fast and lightweight)
-- **Voice activity detection**: Detect human speech using WebRTC VAD
+- **Voice activity detection**: Robust speech detection using Silero VAD (deep learning, noise-resistant)
 - **Attention analysis**: Eye tracking, gaze detection, pupil dilation, and stress/engagement metrics
 - **Facial emotion recognition**: ViT-based classification (`trpakov/vit-face-expression`)
 - **Speech emotion recognition**: Wav2Vec2-based analysis (`superb/wav2vec2-base-superb-er`)
@@ -94,13 +94,13 @@ emotion = detector.get_emotion_only(frame, audio=None)
 Real-time Input → Detection Layer → Analysis Layer → ML Fusion → VLA Model → Actions
       │                 │                  │              │           │           │
    Camera          FaceDetector     FacialEmotion    Neural Net   OpenVLA    ActionHandler
-   Microphone      VoiceActivity    SpeechEmotion    (MLP)                   (extensible)
+   Microphone      SileroVAD        SpeechEmotion    (MLP)                   (extensible)
                    AttentionDet.    AttentionMetrics
 ```
 
 The SDK processes webcam and microphone input through three AI-powered analysis pipelines:
 1. **Facial**: Face detection → ViT emotion recognition (7 emotions)
-2. **Audio**: Voice activity detection → Wav2Vec2 speech emotion (4 emotions)
+2. **Audio**: Silero VAD (voice activity detection) → Wav2Vec2 speech emotion (4 emotions)
 3. **Attention**: Eye tracking → Stress/engagement/nervousness metrics
 
 All outputs are automatically fed into an **ML-based fusion model** (neural network) that combines them into a unified emotion prediction. The fusion works out-of-the-box with sensible default weights, or can be trained on custom data for improved accuracy.
@@ -112,7 +112,7 @@ All outputs are automatically fed into an **ML-based fusion model** (neural netw
 | `vla_model` | `"openvla/openvla-7b"` | VLA model for action generation |
 | `vla_enabled` | `True` | Set `False` for emotion-only mode |
 | `device` | `"cuda"` | `"cuda"`, `"cpu"`, or `"mps"` |
-| `face_detection_model` | `"mediapipe"` | Face detector: `"mediapipe"` or `"mediapipe-full"` |
+| `face_detection_model` | `"mediapipe"` | Face detector model |
 | `face_detection_threshold` | `0.5` | Face detection confidence threshold |
 | `facial_emotion_model` | `"trpakov/vit-face-expression"` | Facial emotion model (HuggingFace) |
 | `speech_emotion_model` | `"superb/wav2vec2-base-superb-er"` | Speech emotion model (HuggingFace) |
@@ -120,24 +120,17 @@ All outputs are automatically fed into an **ML-based fusion model** (neural netw
 | `fusion_device` | `"cpu"` | Device for fusion model (`"cpu"`, `"cuda"`, `"mps"`) |
 | `frame_skip` | `1` | Process every nth frame |
 | `max_faces` | `5` | Maximum faces per frame |
-| `vad_aggressiveness` | `2` | VAD filtering (0-3, higher = stricter) |
 
-### Face Detection Models
+### Face Detection
 
-The SDK uses MediaPipe for fast, lightweight face detection that works well on CPU.
-
-| Model | Range | Speed | Best For |
-|-------|-------|-------|----------|
-| `mediapipe` | ~2 meters | Very Fast | Close-up webcam use (default) |
-| `mediapipe-full` | ~5 meters | Fast | Larger distances, multiple users |
+The SDK uses MediaPipe Tasks API for fast, lightweight face detection that works well on CPU.
 
 ```python
-# Use short-range model for close-up webcam (default)
 config = Config(face_detection_model="mediapipe")
-
-# Use full-range model for larger distances
-config = Config(face_detection_model="mediapipe-full")
+detector = EmotionDetector(config)
 ```
+
+The face detector automatically downloads the model (~200KB) on first use and caches it locally.
 
 ### Temporal Smoothing
 
@@ -175,7 +168,7 @@ config = Config(
 
 ### Attention Analysis
 
-The SDK includes attention analysis using MediaPipe Face Mesh to track eye movements, pupil size, and gaze patterns. This provides additional psychological indicators that modulate the emotion output.
+The SDK includes attention analysis using MediaPipe Face Landmarker to track eye movements, pupil size, and gaze patterns. This provides additional psychological indicators that modulate the emotion output.
 
 | Metric | Description | Range |
 |--------|-------------|-------|
@@ -194,6 +187,7 @@ The ML-based fusion model learns how attention metrics (stress, engagement, nerv
 | Option | Default | Description |
 |--------|---------|-------------|
 | `attention_analysis_enabled` | `True` | Enable attention tracking |
+| `mediapipe_delegate` | `"cpu"` | MediaPipe acceleration: `"cpu"` or `"gpu"` |
 
 ```python
 # Access attention metrics from result
@@ -202,6 +196,14 @@ async for result in detector.stream(camera=0, microphone=0):
         attn = result.emotion.attention
         print(f"Stress: {attn.stress_score:.0%}")
         print(f"Engagement: {attn.engagement_score:.0%}")
+        print(f"Nervousness: {attn.nervousness_score:.0%}")
+
+# Disable attention analysis
+config = Config(attention_analysis_enabled=False)
+
+# Use GPU acceleration (faster but may fail on some systems, especially macOS)
+config = Config(mediapipe_delegate="gpu")
+```
         print(f"Nervousness: {attn.nervousness_score:.0%}")
 
 # Disable attention analysis
@@ -342,7 +344,6 @@ python examples/realtime_multimodal.py
 # With options
 python examples/realtime_multimodal.py --camera 1                    # Different camera
 python examples/realtime_multimodal.py --smoothing ema               # Smoother output
-python examples/realtime_multimodal.py --face-detection mediapipe-full  # Full-range model
 python examples/realtime_multimodal.py --no-attention                # Disable attention tracking
 ```
 

@@ -6,6 +6,8 @@ using AI models, then fuses them via a neural network into unified emotion
 predictions. The ML-based fusion works out-of-the-box with sensible defaults.
 
 Key components:
+- Face detection (MediaPipe - lightweight, fast)
+- Voice activity detection (Silero VAD - noise-resistant deep learning model)
 - Facial emotion recognition (ViT model - 7 emotions)
 - Speech emotion recognition (Wav2Vec2 model - 4 emotions)
 - Attention analysis (stress, engagement, nervousness metrics)
