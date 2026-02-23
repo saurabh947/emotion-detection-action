@@ -1,67 +1,89 @@
-"""Main EmotionDetector class orchestrating the full pipeline."""
+"""Pure-neural, platform-agnostic EmotionDetector.
 
-import asyncio
-from typing import AsyncIterator
+The detector accepts raw numpy frames and numpy/tensor audio — no MediaPipe,
+no Silero VAD, no hardware-specific code.  The entire pipeline runs inside a
+single :class:`~models.fusion.NeuralFusionModel` that combines VideoMAE
+(video) and AST (audio) through bidirectional cross-attention and a GRU
+temporal context buffer.
+
+Platform agnosticism
+--------------------
+* Inputs are plain ``numpy.ndarray`` (frames) and ``numpy.ndarray`` / ``torch.Tensor`` (audio).
+* The :class:`BaseActionHandler` interface is the only robot-facing dependency;
+  users subclass it for their specific platform.
+* No GPIO, no ROS, no robot-SDK imports anywhere in this module.
+
+Output contract
+---------------
+Every call returns a :class:`~core.types.NeuralEmotionResult` Pydantic model
+containing:
+
+* ``dominant_emotion`` — string label
+* ``latent_embedding`` — 512-dim float list (VLA input)
+* ``metrics`` — ``{stress, engagement, arousal}`` in ``[0, 1]``
+* ``confidence`` — max softmax probability
+"""
+
+from __future__ import annotations
+
+import time
+from collections import deque
+from typing import AsyncIterator, Iterator, Literal
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 from emotion_detection_action.actions.base import BaseActionHandler
 from emotion_detection_action.actions.logging_handler import LoggingActionHandler
-from emotion_detection_action.core.config import Config, ModelConfig
-from emotion_detection_action.core.types import (
-    ActionCommand,
-    AttentionResult,
-    DetectionResult,
-    EmotionResult,
-    PipelineResult,
-)
-from emotion_detection_action.detection.attention import AttentionDetector
-from emotion_detection_action.detection.face import FaceDetector
-from emotion_detection_action.detection.voice import VoiceActivityDetector
-from emotion_detection_action.emotion.attention import AttentionAnalyzer
-from emotion_detection_action.emotion.facial import FacialEmotionRecognizer
-from emotion_detection_action.emotion.fusion import EmotionFusion
-from emotion_detection_action.emotion.smoothing import EmotionSmoother, SmoothingConfig
-from emotion_detection_action.emotion.speech import SpeechEmotionRecognizer
-from emotion_detection_action.inputs.audio import AudioInput
-from emotion_detection_action.inputs.base import AudioChunk, VideoFrame
-from emotion_detection_action.inputs.video import VideoInput
-from emotion_detection_action.models.vla.base import BaseVLAModel
-from emotion_detection_action.models.vla.openvla import OpenVLAModel
+from emotion_detection_action.core.config import Config
+from emotion_detection_action.core.types import NeuralEmotionResult
+from emotion_detection_action.models.backbones import BackboneConfig
+from emotion_detection_action.models.fusion import NeuralFusionModel
+
+try:
+    import torchaudio.transforms as _T
+
+    _TORCHAUDIO_AVAILABLE = True
+except ImportError:
+    _TORCHAUDIO_AVAILABLE = False
+
+# Target spatial resolution expected by VideoMAE and ViViT.
+_VIDEO_FRAME_SIZE: int = 224
 
 
 class EmotionDetector:
-    """Main emotion detector class orchestrating the full pipeline.
+    """Pure-neural, platform-agnostic multimodal emotion detector.
 
-    This class integrates all components of the emotion detection system:
-    - Face detection (MediaPipe)
-    - Voice activity detection (Silero VAD - noise-resistant deep learning)
-    - Attention analysis (gaze, pupil dilation, stress/engagement metrics)
-    - Facial emotion recognition (ViT model)
-    - Speech emotion recognition (Wav2Vec2 model)
-    - ML-based multimodal fusion (neural network - works out-of-the-box)
-    - VLA-based action generation (optional)
+    Wraps a :class:`~models.fusion.NeuralFusionModel` and handles:
 
-    The fusion step uses a neural network that automatically combines facial,
-    speech, and attention outputs into a unified emotion prediction. It works
-    out-of-the-box with sensible default weights (60% facial, 40% speech).
+    * Rolling frame buffer (clips sent to the video backbone)
+    * Raw PCM → log mel-spectrogram conversion (torchaudio)
+    * Temporal GRU state management
+    * Quantization for deployment
+    * A :class:`~actions.base.BaseActionHandler` integration point
 
-    Example:
-        >>> from emotion_detection_action import EmotionDetector, Config
+    Typical usage::
 
-        >>> # Create detector with default config (ML fusion works automatically)
-        >>> detector = EmotionDetector()
-        >>> detector.initialize()
+        detector = EmotionDetector()
+        detector.initialize()
 
-        >>> # Real-time streaming from webcam + microphone
-        >>> async for result in detector.stream(camera=0, microphone=0):
-        ...     print(result.emotion.dominant_emotion)
-        ...     if result.emotion.attention:
-        ...         print(f"Stress: {result.emotion.attention.stress_score:.2f}")
+        # Single-frame API (builds clip buffer internally)
+        for bgr_frame, audio_chunk in my_sensor_loop():
+            result = detector.process_frame(bgr_frame, audio_chunk)
+            if result:
+                print(result.dominant_emotion, result.metrics)
 
-        >>> # Process a single frame (for custom real-time pipelines)
-        >>> result = detector.process_frame(frame, audio, timestamp=0.0)
-        >>> print(result.emotion.dominant_emotion)
+        # Clip API (caller manages frame batching)
+        clip = np.stack([frame1, frame2, ..., frame16])  # (16, H, W, 3)
+        result = detector.process(clip, audio_samples)
+
+        # Quantize for low-latency deployment
+        detector.quantize("dynamic")
+
+    Args:
+        config: SDK configuration.  Defaults are used if ``None``.
+        action_handler: Optional handler for robot actions.
     """
 
     def __init__(
@@ -69,360 +91,372 @@ class EmotionDetector:
         config: Config | None = None,
         action_handler: BaseActionHandler | None = None,
     ) -> None:
-        """Initialize the emotion detector.
-
-        Args:
-            config: Configuration for the detector. Uses defaults if None.
-            action_handler: Custom action handler. Uses stub if None.
-        """
         self.config = config or Config()
-        self.action_handler = action_handler or LoggingActionHandler(verbose=self.config.verbose)
+        self.action_handler = action_handler or LoggingActionHandler(
+            verbose=self.config.verbose
+        )
 
-        # Components (initialized lazily)
-        self._face_detector: FaceDetector | None = None
-        self._voice_detector: VoiceActivityDetector | None = None
-        self._attention_detector: AttentionDetector | None = None
-        self._attention_analyzer: AttentionAnalyzer | None = None
-        self._facial_emotion: FacialEmotionRecognizer | None = None
-        self._speech_emotion: SpeechEmotionRecognizer | None = None
-        self._fusion: EmotionFusion | None = None
-        self._smoother: EmotionSmoother | None = None
-        self._vla_model: BaseVLAModel | None = None
+        self._model: NeuralFusionModel | None = None
+        self._mel_transform: object | None = None
+
+        # Frame buffer: (T, H, W, 3) RGB numpy arrays
+        self._frame_buffer: deque[np.ndarray] = deque(
+            maxlen=self.config.two_tower_video_frames
+        )
+        # Raw PCM buffer: list of float32 numpy arrays
+        self._audio_buffer: list[np.ndarray] = []
 
         self._initialized = False
+        self._is_quantized = False
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle                                                            #
+    # ------------------------------------------------------------------ #
 
     @property
     def is_initialized(self) -> bool:
-        """Check if detector is initialized."""
         return self._initialized
 
-    def initialize(self, load_vla: bool = True) -> None:
-        """Initialize all pipeline components.
+    @property
+    def is_quantized(self) -> bool:
+        return self._is_quantized
 
-        Args:
-            load_vla: Whether to load the VLA model. Set False for emotion-only mode.
+    def initialize(self) -> None:
+        """Load backbone weights and prepare the mel-spectrogram transform.
+
+        Calling this explicitly is optional — ``process`` and ``process_frame``
+        call it lazily on the first invocation.
         """
         if self._initialized:
             return
 
-        # Initialize face detector
-        face_config = ModelConfig(
-            model_id=self.config.face_detection_model,
-            device=self.config.device,
-            extra_kwargs={"threshold": self.config.face_detection_threshold},
-        )
-        self._face_detector = FaceDetector(
-            face_config,
-            threshold=self.config.face_detection_threshold,
-            min_face_size=self.config.face_min_size,
-            max_faces=self.config.max_faces,
-        )
-        self._face_detector.load()
+        cfg = self.config
 
-        # Initialize voice activity detector
-        vad_config = ModelConfig(model_id="silero-vad", device="cpu")
-        self._voice_detector = VoiceActivityDetector(vad_config)
-        self._voice_detector.load()
-
-        # Initialize attention detector (if enabled)
-        if self.config.attention_analysis_enabled:
-            try:
-                attention_config = ModelConfig(
-                    model_id="mediapipe",
-                    device="cpu",
-                    extra_kwargs={"mediapipe_delegate": self.config.mediapipe_delegate}
-                )
-                self._attention_detector = AttentionDetector(attention_config)
-                self._attention_detector.load()
-                self._attention_analyzer = AttentionAnalyzer(detector=self._attention_detector)
-                if self.config.verbose:
-                    print("Attention analysis initialized successfully")
-            except Exception as e:
-                if self.config.verbose:
-                    print(f"Attention analysis disabled: {e}")
-                self._attention_detector = None
-                self._attention_analyzer = None
-
-        # Initialize facial emotion recognizer
-        facial_config = self.config.get_facial_emotion_config()
-        self._facial_emotion = FacialEmotionRecognizer(facial_config)
-        self._facial_emotion.load()
-
-        # Initialize speech emotion recognizer
-        speech_config = self.config.get_speech_emotion_config()
-        self._speech_emotion = SpeechEmotionRecognizer(
-            speech_config,
-            target_sample_rate=self.config.sample_rate,
-        )
-        self._speech_emotion.load()
-
-        # Initialize fusion module (ML-based)
-        self._fusion = EmotionFusion(
-            model_path=self.config.fusion_model_path,
-            device=self.config.fusion_device,
+        backbone_cfg = BackboneConfig(
+            video_model=cfg.two_tower_video_model,
+            video_model_name=cfg.two_tower_video_backbone,
+            video_num_frames=cfg.two_tower_video_frames,
+            audio_model_name=cfg.two_tower_audio_backbone,
+            audio_freeze_layers=cfg.two_tower_audio_freeze_layers,
+            video_freeze_layers=cfg.two_tower_video_freeze_layers,
+            pretrained=cfg.two_tower_pretrained,
+            d_model=cfg.two_tower_d_model,
         )
 
-        # Initialize temporal smoother
-        smoothing_config = SmoothingConfig(
-            strategy=self.config.smoothing_strategy,
-            window_size=self.config.smoothing_window,
-            ema_alpha=self.config.smoothing_ema_alpha,
-            hysteresis_threshold=self.config.smoothing_hysteresis_threshold,
-            hysteresis_frames=self.config.smoothing_hysteresis_frames,
+        self._model = NeuralFusionModel(
+            config=backbone_cfg,
+            num_cross_attn_layers=cfg.two_tower_cross_attn_layers,
+            num_heads=8,
+            gru_layers=cfg.two_tower_gru_layers,
         )
-        self._smoother = EmotionSmoother(smoothing_config)
 
-        # Initialize VLA model (optional)
-        if load_vla and self.config.vla_enabled:
-            vla_config = self.config.get_vla_config()
-            self._vla_model = OpenVLAModel(vla_config)
-            self._vla_model.load()
+        if cfg.two_tower_model_path:
+            state = torch.load(
+                cfg.two_tower_model_path, map_location=cfg.two_tower_device
+            )
+            self._model.load_state_dict(state)
+            if cfg.verbose:
+                print(f"Loaded checkpoint: {cfg.two_tower_model_path}")
 
-        # Connect action handler
+        self._model.to(cfg.two_tower_device)
+        self._model.eval()
+
+        if _TORCHAUDIO_AVAILABLE:
+            self._mel_transform = _T.MelSpectrogram(
+                sample_rate=cfg.sample_rate,
+                n_mels=cfg.two_tower_n_mels,
+                n_fft=cfg.two_tower_n_fft,
+                hop_length=cfg.two_tower_hop_length,
+                power=2.0,
+            )
+        elif cfg.verbose:
+            print("torchaudio not available — audio tower will use zero tensors.")
+
         self.action_handler.connect()
-
         self._initialized = True
 
-    def shutdown(self) -> None:
-        """Shutdown and release all resources."""
-        if self._face_detector:
-            self._face_detector.unload()
-        if self._voice_detector:
-            self._voice_detector.unload()
-        if self._attention_detector:
-            self._attention_detector.unload()
-        if self._facial_emotion:
-            self._facial_emotion.unload()
-        if self._speech_emotion:
-            self._speech_emotion.unload()
-        if self._vla_model:
-            self._vla_model.unload()
+        if cfg.verbose:
+            n = self._model.count_parameters()
+            print(f"NeuralFusionModel ready ({n:,} trainable params) on {cfg.two_tower_device}")
 
+    def shutdown(self) -> None:
+        """Release resources and reset buffers."""
+        self._frame_buffer.clear()
+        self._audio_buffer.clear()
+        if self._model is not None:
+            self._model.reset_temporal_state()
         self.action_handler.disconnect()
         self._initialized = False
 
-    async def stream(
-        self,
-        camera: int = 0,
-        microphone: int | str | None = None,
-    ) -> AsyncIterator[PipelineResult]:
-        """Stream real-time emotion detection from camera and microphone.
+    # ------------------------------------------------------------------ #
+    # Quantization                                                         #
+    # ------------------------------------------------------------------ #
+
+    def quantize(self, mode: Literal["dynamic", "static"] = "dynamic") -> None:
+        """Quantize the underlying model to INT8 for faster CPU inference.
+
+        Should be called **after** ``initialize()`` and **before** streaming.
+        Dynamic quantization is recommended — no calibration data required.
 
         Args:
-            camera: Camera device index (0 = default camera).
-            microphone: Audio device index or name. None to disable audio.
+            mode: ``"dynamic"`` (default) — weights quantized statically,
+                activations computed at runtime.  ``~2-3×`` speedup on CPU
+                with ``~4×`` memory reduction.
 
-        Yields:
-            Pipeline results for each processed frame.
+        Raises:
+            RuntimeError: If ``initialize()`` has not been called yet.
+        """
+        if self._model is None:
+            raise RuntimeError("Call initialize() before quantize().")
+        self._model = self._model.quantize(mode)
+        self._is_quantized = True
+        if self.config.verbose:
+            print(f"Model quantized ({mode} INT8).")
+
+    # ------------------------------------------------------------------ #
+    # Single-clip processing (primary API)                                 #
+    # ------------------------------------------------------------------ #
+
+    def process(
+        self,
+        frames: np.ndarray,
+        audio: np.ndarray | torch.Tensor | None = None,
+        timestamp: float | None = None,
+    ) -> NeuralEmotionResult:
+        """Process a complete clip of frames with optional audio.
+
+        Args:
+            frames: ``(T, H, W, 3)`` uint8 or float32 RGB numpy array.
+                Any spatial resolution is accepted — frames are resized to
+                224×224 internally.
+            audio: Raw PCM samples (float32, mono) as a numpy array or
+                torch.Tensor.  Pass ``None`` for video-only mode.
+            timestamp: Clip timestamp in seconds.  Defaults to ``time.time()``.
+
+        Returns:
+            :class:`~core.types.NeuralEmotionResult` with all output fields.
         """
         if not self._initialized:
             self.initialize()
 
-        video_input = VideoInput(frame_skip=self.config.frame_skip)
-        video_input.open(camera)
+        ts = timestamp if timestamp is not None else time.time()
+        assert self._model is not None
 
-        audio_input: AudioInput | None = None
-        if microphone is not None:
-            audio_input = AudioInput(sample_rate=self.config.sample_rate)
-            audio_input.open(microphone)
+        video_tensor = self._frames_to_tensor(frames)        # (1, T, 3, 224, 224)
+        audio_tensor = self._audio_to_tensor(audio)          # (1, time, mel) or None
+        device = self.config.two_tower_device
+        video_tensor = video_tensor.to(device)
+        if audio_tensor is not None:
+            audio_tensor = audio_tensor.to(device)
 
-        try:
-            async for frame in video_input:
-                # Get audio chunk if available
-                audio_chunk = None
-                if audio_input:
-                    audio_chunk = audio_input.read()
+        with torch.no_grad():
+            out = self._model(video_tensor, audio_tensor, use_temporal=True)
 
-                result = self._process_frame(frame, audio_chunk)
-                if result:
-                    yield result
-
-                # Small delay to prevent CPU overload
-                await asyncio.sleep(0.001)
-
-        finally:
-            video_input.close()
-            if audio_input:
-                audio_input.close()
+        return self._build_result(out, ts)
 
     def process_frame(
         self,
         frame: np.ndarray,
         audio: np.ndarray | None = None,
-        timestamp: float = 0.0,
-    ) -> PipelineResult | None:
-        """Process a single frame with optional audio.
+        timestamp: float | None = None,
+    ) -> NeuralEmotionResult | None:
+        """Accumulate one BGR frame into the rolling buffer and run inference.
 
-        Lower-level API for custom processing pipelines.
+        Accepts a **single** BGR frame (as OpenCV produces) and accumulates it
+        into the internal rolling buffer.  Inference runs every time the buffer
+        is primed (from the first call onward, with repeat-padding for early
+        frames).
 
         Args:
-            frame: Video frame as numpy array (H, W, C) in BGR format.
-            audio: Optional audio data as numpy array.
-            timestamp: Frame timestamp in seconds.
+            frame: ``(H, W, 3)`` BGR or RGB uint8 frame from a camera.
+                BGR frames are converted to RGB automatically.
+            audio: Optional raw PCM audio chunk (float32, mono).
+            timestamp: Frame timestamp.  Defaults to ``time.time()``.
 
         Returns:
-            Pipeline result or None if processing failed.
+            :class:`NeuralEmotionResult`, or ``None`` if the frame buffer is
+            completely empty (only possible on the very first call).
         """
         if not self._initialized:
             self.initialize()
 
-        video_frame = VideoFrame(data=frame, timestamp=timestamp, frame_number=0)
+        ts = timestamp if timestamp is not None else time.time()
 
-        audio_chunk = None
+        # Convert BGR → RGB if the frame looks like a typical OpenCV frame.
+        rgb = frame[..., ::-1].copy() if frame.ndim == 3 and frame.shape[2] == 3 else frame
+        self._frame_buffer.append(rgb)
+
         if audio is not None:
-            audio_chunk = AudioChunk(
-                data=audio,
-                sample_rate=self.config.sample_rate,
-                start_time=timestamp,
-            )
+            self._audio_buffer.append(audio.astype(np.float32))
 
-        return self._process_frame(video_frame, audio_chunk)
-
-    def _process_frame(
-        self,
-        frame: VideoFrame,
-        audio_chunk: AudioChunk | None,
-    ) -> PipelineResult | None:
-        """Internal method to process a frame through the pipeline.
-
-        Args:
-            frame: Video frame to process.
-            audio_chunk: Optional audio chunk.
-
-        Returns:
-            Pipeline result or None.
-        """
-        assert self._face_detector is not None
-        assert self._facial_emotion is not None
-        assert self._fusion is not None
-
-        timestamp = frame.timestamp
-
-        # Convert BGR to RGB for face detection
-        rgb_frame = VideoInput.bgr_to_rgb(frame.data)
-
-        # Detect faces
-        faces = self._face_detector.predict(rgb_frame)
-
-        # Process voice activity if audio available
-        voice_detection = None
-        if audio_chunk and self._voice_detector:
-            voice_detection = self._voice_detector.predict(audio_chunk)
-
-        # Process attention/gaze analysis (only if face detected)
-        gaze_detection = None
-        attention_result: AttentionResult | None = None
-        if self._attention_detector and self._attention_analyzer and faces:
-            gaze_detection = self._attention_detector.predict(rgb_frame)
-            if gaze_detection:
-                blink_rate = self._attention_detector.get_blink_rate()
-                pupil_dilation = self._attention_detector.get_pupil_dilation()
-                gaze_stability = self._attention_detector.get_gaze_stability()
-
-                attention_result = self._attention_analyzer.analyze(
-                    gaze=gaze_detection,
-                    blink_rate=blink_rate,
-                    pupil_dilation=pupil_dilation,
-                    gaze_stability=gaze_stability,
-                    timestamp=timestamp,
-                )
-
-        # Create detection result
-        detection = DetectionResult(
-            timestamp=timestamp,
-            faces=faces,
-            voice=voice_detection,
-            gaze=gaze_detection,
-            frame=frame.data,
-        )
-
-        # Facial emotion recognition
-        facial_result = None
-        if faces:
-            # Process first face (could extend to multiple)
-            facial_result = self._facial_emotion.predict(faces[0])
-
-        # Speech emotion recognition
-        speech_result = None
-        if voice_detection and voice_detection.is_speech and self._speech_emotion:
-            speech_result = self._speech_emotion.predict(voice_detection)
-
-        # Fuse emotions (including attention analysis)
-        if facial_result is None and speech_result is None:
+        if not self._frame_buffer:
             return None
 
-        emotion_result = self._fusion.fuse(
-            facial_result, speech_result, attention_result, timestamp
+        frames_arr = np.stack(list(self._frame_buffer), axis=0)  # (T, H, W, 3)
+        audio_arr = (
+            np.concatenate(self._audio_buffer[-self.config.sample_rate * 3 :], axis=0)
+            if self._audio_buffer
+            else None
         )
+        return self.process(frames_arr, audio_arr, timestamp=ts)
 
-        # Apply temporal smoothing
-        if self._smoother is not None:
-            emotion_result = self._smoother.smooth(emotion_result)
+    # ------------------------------------------------------------------ #
+    # Streaming helpers                                                    #
+    # ------------------------------------------------------------------ #
 
-        # Generate action
-        action = self._generate_action(emotion_result, frame.data)
+    def stream_frames(
+        self,
+        frame_iterator: Iterator[tuple[np.ndarray, np.ndarray | None]],
+    ) -> Iterator[NeuralEmotionResult]:
+        """Wrap a (frame, audio) iterator to yield :class:`NeuralEmotionResult`.
 
-        # Execute action through handler
-        self.action_handler.execute(action)
+        Args:
+            frame_iterator: An iterator yielding ``(frame, audio_chunk)`` tuples.
+                ``audio_chunk`` may be ``None``.
 
-        return PipelineResult(
+        Yields:
+            :class:`NeuralEmotionResult` for each frame.
+
+        Example::
+
+            def my_camera() -> Iterator[tuple[np.ndarray, None]]:
+                cap = cv2.VideoCapture(0)
+                while True:
+                    ret, frame = cap.read()
+                    if ret:
+                        yield frame, None
+
+            for result in detector.stream_frames(my_camera()):
+                print(result.dominant_emotion)
+        """
+        if not self._initialized:
+            self.initialize()
+        for frame, audio in frame_iterator:
+            result = self.process_frame(frame, audio)
+            if result is not None:
+                yield result
+
+    # ------------------------------------------------------------------ #
+    # State management                                                     #
+    # ------------------------------------------------------------------ #
+
+    def reset(self) -> None:
+        """Reset frame buffer, audio buffer, and GRU temporal state.
+
+        Call this when the subject changes (e.g., a new person sits in front
+        of the robot) so past context does not bleed into the new session.
+        """
+        self._frame_buffer.clear()
+        self._audio_buffer.clear()
+        if self._model is not None:
+            self._model.reset_temporal_state()
+
+    # ------------------------------------------------------------------ #
+    # Tensor construction helpers                                          #
+    # ------------------------------------------------------------------ #
+
+    def _frames_to_tensor(self, frames: np.ndarray) -> torch.Tensor:
+        """Convert ``(T, H, W, 3)`` numpy frames → ``(1, T, 3, 224, 224)`` tensor.
+
+        * Handles both uint8 [0, 255] and float32 [0, 1] inputs.
+        * Repeat-pads at the start if fewer than ``two_tower_video_frames`` frames
+          are provided (preserves the most recent frames on the right).
+        * Resizes to 224×224 via bilinear interpolation.
+        """
+        target_t = self.config.two_tower_video_frames
+
+        # Normalise to float32 [0, 1]
+        if frames.dtype == np.uint8:
+            frames = frames.astype(np.float32) / 255.0
+
+        # Repeat-pad along the time axis if needed
+        T = frames.shape[0]
+        if T < target_t:
+            pad = np.repeat(frames[:1], target_t - T, axis=0)
+            frames = np.concatenate([pad, frames], axis=0)
+        elif T > target_t:
+            frames = frames[-target_t:]
+
+        # (T, H, W, 3) → (T, 3, H, W)
+        t = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
+
+        # Resize spatial dims if needed
+        H, W = t.shape[-2:]
+        if (H, W) != (_VIDEO_FRAME_SIZE, _VIDEO_FRAME_SIZE):
+            t = F.interpolate(
+                t,
+                size=(_VIDEO_FRAME_SIZE, _VIDEO_FRAME_SIZE),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        return t.unsqueeze(0)  # (1, T, 3, 224, 224)
+
+    def _audio_to_tensor(
+        self,
+        audio: np.ndarray | torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Convert raw PCM audio → ``(1, time_steps, mel_bins)`` tensor.
+
+        Returns ``None`` if ``audio`` is ``None`` or torchaudio is unavailable.
+        """
+        if audio is None or self._mel_transform is None:
+            return None
+
+        if isinstance(audio, np.ndarray):
+            audio = torch.from_numpy(audio.astype(np.float32))
+
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)  # (1, samples)
+
+        mel = self._mel_transform(audio)             # (1, mel, time)
+        mel = torch.log1p(mel)                       # log-compression
+        mel = mel.squeeze(0).transpose(0, 1)         # (time, mel)
+        return mel.unsqueeze(0)                      # (1, time, mel)
+
+    # ------------------------------------------------------------------ #
+    # Result construction                                                  #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _build_result(
+        out: "NeuralFusionModel.__class__.__mro__[0]",
+        timestamp: float,
+    ) -> NeuralEmotionResult:
+        from emotion_detection_action.models.fusion import NeuralFusionModel
+
+        probs = out.emotion_probs[0].cpu().tolist()
+        emotion_scores = dict(zip(NeuralFusionModel.EMOTION_ORDER, probs))
+        dominant = max(emotion_scores, key=emotion_scores.__getitem__)
+
+        metrics_vals = out.metrics[0].cpu().tolist()
+        metrics = dict(zip(NeuralFusionModel.METRIC_ORDER, metrics_vals))
+
+        embedding = out.latent_embedding[0].cpu().tolist()
+
+        return NeuralEmotionResult(
+            dominant_emotion=dominant,
+            emotion_scores=emotion_scores,
+            latent_embedding=embedding,
+            metrics=metrics,
+            confidence=float(max(probs)),
             timestamp=timestamp,
-            detection=detection,
-            emotion=emotion_result,
-            action=action,
+            video_missing=out.video_missing,
+            audio_missing=out.audio_missing,
         )
 
-    def _generate_action(
-        self,
-        emotion: EmotionResult,
-        image: np.ndarray | None,
-    ) -> ActionCommand:
-        """Generate action based on emotion.
-
-        Args:
-            emotion: Detected emotion result.
-            image: Optional visual context.
-
-        Returns:
-            Generated action command.
-        """
-        # Use VLA model if available
-        if self._vla_model and self._vla_model.is_loaded:
-            return self._vla_model.generate_emotion_response(emotion, image)
-
-        # Fall back to stub action
-        return ActionCommand.stub(emotion)
-
-    def get_emotion_only(
-        self,
-        frame: np.ndarray,
-        audio: np.ndarray | None = None,
-    ) -> EmotionResult | None:
-        """Get emotion result without action generation.
-
-        Useful when you only need emotion detection.
-
-        Args:
-            frame: Video frame in BGR format.
-            audio: Optional audio data.
-
-        Returns:
-            Emotion result or None.
-        """
-        result = self.process_frame(frame, audio)
-        return result.emotion if result else None
+    # ------------------------------------------------------------------ #
+    # Context manager                                                      #
+    # ------------------------------------------------------------------ #
 
     def __enter__(self) -> "EmotionDetector":
-        """Context manager entry - initialize."""
         self.initialize()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Context manager exit - shutdown."""
+    def __exit__(self, *_: object) -> None:
         self.shutdown()
 
     def __repr__(self) -> str:
-        return (
-            f"EmotionDetector(vla={self.config.vla_model}, "
-            f"initialized={self._initialized})"
-        )
+        status = "initialized" if self._initialized else "not initialized"
+        q = " [quantized]" if self._is_quantized else ""
+        return f"EmotionDetector({status}{q}, video={self.config.two_tower_video_model!r})"
