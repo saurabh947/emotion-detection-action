@@ -15,7 +15,14 @@ from pydantic import BaseModel, Field
 
 
 class EmotionLabel(str, Enum):
-    """Standard emotion labels."""
+    """Standard emotion labels.
+
+    ``UNCLEAR`` is the 8th class.  It is predicted when no person is present,
+    the signal is too noisy to classify reliably, or the model's confidence is
+    below a meaningful threshold.  It is a *trained* label — label your
+    "empty scene", occluded, or ambiguous samples as ``unclear`` and include
+    them in Phase 1 / Phase 2 training.
+    """
 
     HAPPY = "happy"
     SAD = "sad"
@@ -24,6 +31,7 @@ class EmotionLabel(str, Enum):
     SURPRISED = "surprised"
     DISGUSTED = "disgusted"
     NEUTRAL = "neutral"
+    UNCLEAR = "unclear"
 
 
 @dataclass
@@ -299,24 +307,33 @@ class NeuralEmotionResult(BaseModel):
     stored in structured logs without extra conversion.
 
     Attributes:
-        dominant_emotion: Label of the highest-probability emotion
-            (e.g. ``"happy"``).
+        dominant_emotion: Label of the highest-probability emotion class
+            (e.g. ``"happy"`` or ``"unclear"``).
         emotion_scores: Per-class softmax probabilities keyed by emotion label.
-            Keys: ``angry · disgusted · fearful · happy · neutral · sad · surprised``.
+            Keys: ``angry · disgusted · fearful · happy · neutral · sad ·
+            surprised · unclear``.
         latent_embedding: 512-dim float list encoding the "raw" emotional state
             *after* temporal GRU smoothing.  Feed this directly to VLA models
             (e.g., OpenVLA) as the emotion context vector.
         metrics: Continuous [0, 1] Sigmoid outputs from the neural attention head:
-            ``stress``, ``engagement``, ``arousal``.
+            ``stress``, ``engagement``, ``arousal``.  These are near-zero when
+            ``dominant_emotion == "unclear"``.
         confidence: Max softmax probability — proxy for prediction certainty.
         timestamp: Frame timestamp in seconds.
         video_missing: ``True`` when no video was available for this clip.
         audio_missing: ``True`` when no audio was available for this clip.
+
+    Usage tip — gate on the ``"unclear"`` label before acting::
+
+        result = detector.process(clip)
+        if result.dominant_emotion != "unclear":
+            robot.react_to(result.dominant_emotion)
     """
 
     dominant_emotion: str = Field(description="Highest-probability emotion label.")
     emotion_scores: dict[str, float] = Field(
-        description="Softmax probabilities for all 7 emotion classes."
+        description="Softmax probabilities for all 8 emotion classes "
+                    "(7 standard emotions + unclear)."
     )
     latent_embedding: list[float] = Field(
         description="512-dim GRU-smoothed fused embedding for VLA integration."

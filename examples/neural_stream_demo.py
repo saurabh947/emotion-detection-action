@@ -5,7 +5,8 @@ Demonstrates two streaming modes:
 
 1. **Webcam mode** (``--webcam``) — reads from a real camera and microphone.
    The :class:`~emotion_detection_action.InferenceWorker` runs inference on a
-   background thread so the capture loop never stalls.
+   background thread so the capture loop never stalls.  The latest result is
+   overlaid on the live video window in the top-left corner.
 
 2. **Simulation mode** (default) — generates synthetic numpy arrays at a
    controlled fps to benchmark throughput and latency without hardware.
@@ -48,6 +49,8 @@ Usage
     python examples/neural_stream_demo.py --webcam --device cuda --workers 4 --queue-size 16
 """
 
+from __future__ import annotations
+
 import argparse
 import signal
 import sys
@@ -84,7 +87,14 @@ class ConsoleActionHandler(BaseActionHandler):
         pass
 
     def execute(self, result: NeuralEmotionResult) -> None:  # type: ignore[override]
-        """Dispatch robot action based on dominant emotion."""
+        """Dispatch robot action based on dominant emotion.
+
+        Always check the ``"unclear"`` label before acting — the model
+        returns it when no person is detected, the signal is too noisy, or
+        confidence is too low to classify reliably.
+        """
+        if result.dominant_emotion == "unclear":
+            return  # nothing to react to
         if result.dominant_emotion in ("sad", "fearful") and result.confidence > 0.6:
             pass  # e.g. robot.comfort_gesture()
         if result.metrics.get("stress", 0) > 0.8:
@@ -98,8 +108,9 @@ class ConsoleActionHandler(BaseActionHandler):
 _ICONS: dict[str, str] = {
     "angry": "😠", "disgusted": "🤢", "fearful": "😨",
     "happy": "😊", "neutral": "😐", "sad": "😢", "surprised": "😲",
+    "unclear": "?",  # no person present, noisy signal, or low confidence
 }
-_W = 18  # bar width
+_W = 18  # terminal bar width
 
 
 def _bar(value: float, width: int = _W) -> str:
@@ -118,6 +129,20 @@ def _print_status(
         return
 
     icon = _ICONS.get(result.dominant_emotion, "?")
+
+    if result.dominant_emotion == "unclear":
+        # Compact line — no metrics when signal is unclear
+        print(
+            f"\r  [{frame_idx:5d}] {icon} unclear        "
+            f"conf={result.confidence:4.0%} | "
+            f"q={stats.queue_depth} drop={stats.drop_rate:.0%} "
+            f"p50={stats.inference_latency_ms_p50:.0f}ms "
+            f"fps={stats.effective_fps:.1f}",
+            end="",
+            flush=True,
+        )
+        return
+
     print(
         f"\r  [{frame_idx:5d}] {icon} {result.dominant_emotion:<10} "
         f"{_bar(result.confidence)} {result.confidence:4.0%} | "
@@ -130,6 +155,116 @@ def _print_status(
         end="",
         flush=True,
     )
+
+
+def _draw_overlay(frame: np.ndarray, result: NeuralEmotionResult) -> np.ndarray:
+    """Draw the inference result as an overlay in the top-left of the frame.
+
+    Renders:
+    * Emotion label + confidence on the first line
+    * A filled confidence bar
+    * Three metric rows (stress / engagement / arousal) with mini bars
+
+    Args:
+        frame: BGR uint8 frame to annotate (modified in-place copy).
+        result: Latest :class:`NeuralEmotionResult` from the detector.
+
+    Returns:
+        Annotated BGR frame.
+    """
+    try:
+        import cv2  # type: ignore[import]
+    except ImportError:
+        return frame
+
+    out = frame.copy()
+    h, w = out.shape[:2]
+
+    # ── Layout constants ──────────────────────────────────────────────
+    PAD = 10           # pixels from frame edge
+    LINE_H = 26        # pixels per text row
+    BAR_H = 8          # height of metric bars
+    BAR_W = 120        # width of metric bars
+    BOX_W = 240        # overlay background width
+    BOX_H = PAD + LINE_H + BAR_H + PAD + 3 * (LINE_H + 2) + PAD
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+    FONT_SCALE_LG = 0.65
+    FONT_SCALE_SM = 0.48
+    THICK = 1
+
+    # Emotion-specific accent colour (BGR)
+    _COLOURS: dict[str, tuple[int, int, int]] = {
+        "angry":     (0,   50,  220),
+        "disgusted": (0,  140,   70),
+        "fearful":   (200, 100,   0),
+        "happy":     (0,  200,  255),
+        "neutral":   (180, 180, 180),
+        "sad":       (200,  80,   0),
+        "surprised": (0,  220,  220),
+        "unclear":   (80,  80,   80),  # dark grey — unclear / no person present
+    }
+    accent = _COLOURS.get(result.dominant_emotion, (100, 200, 100))
+
+    # ── Semi-transparent background ───────────────────────────────────
+    x0, y0 = PAD, PAD
+    x1, y1 = x0 + BOX_W, y0 + BOX_H
+    # Clamp to frame bounds
+    x1 = min(x1, w - 1)
+    y1 = min(y1, h - 1)
+
+    overlay = out.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
+
+    # Accent left-edge bar
+    cv2.rectangle(out, (x0, y0), (x0 + 4, y1), accent, -1)
+
+    # ── Unclear state: minimal overlay ───────────────────────────────
+    if result.dominant_emotion == "unclear":
+        cv2.putText(out, "UNCLEAR", (x0 + 12, y0 + LINE_H),
+                    FONT, FONT_SCALE_LG, accent, THICK, cv2.LINE_AA)
+        cv2.putText(out, f"conf {result.confidence:.0%}", (x0 + 12, y0 + LINE_H * 2),
+                    FONT, FONT_SCALE_SM, (130, 130, 130), THICK, cv2.LINE_AA)
+        return out
+
+    # ── Emotion label + confidence ────────────────────────────────────
+    ty = y0 + LINE_H
+    emotion_text = f"{result.dominant_emotion.upper()}  {result.confidence:.0%}"
+    cv2.putText(out, emotion_text, (x0 + 12, ty),
+                FONT, FONT_SCALE_LG, accent, THICK + 1, cv2.LINE_AA)
+
+    # Confidence bar (below emotion label)
+    bar_y = ty + 4
+    bar_filled = int(BAR_W * result.confidence)
+    cv2.rectangle(out, (x0 + 12, bar_y), (x0 + 12 + BAR_W, bar_y + BAR_H),
+                  (60, 60, 60), -1)
+    cv2.rectangle(out, (x0 + 12, bar_y), (x0 + 12 + bar_filled, bar_y + BAR_H),
+                  accent, -1)
+
+    # ── Metric rows ───────────────────────────────────────────────────
+    metrics_order = [
+        ("stress",     result.metrics.get("stress", 0.0)),
+        ("engagement", result.metrics.get("engagement", 0.0)),
+        ("arousal",    result.metrics.get("arousal", 0.0)),
+    ]
+    metric_y = bar_y + BAR_H + PAD
+
+    for label, value in metrics_order:
+        metric_y += LINE_H
+        # Label
+        cv2.putText(out, f"{label:<10} {value:.2f}", (x0 + 12, metric_y),
+                    FONT, FONT_SCALE_SM, (200, 200, 200), THICK, cv2.LINE_AA)
+        # Mini bar
+        bar_x = x0 + 12 + 105
+        filled = int((BAR_W - 30) * value)
+        cv2.rectangle(out, (bar_x, metric_y - 10),
+                      (bar_x + BAR_W - 30, metric_y - 10 + BAR_H - 2),
+                      (60, 60, 60), -1)
+        cv2.rectangle(out, (bar_x, metric_y - 10),
+                      (bar_x + filled, metric_y - 10 + BAR_H - 2),
+                      (100, 180, 100), -1)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +362,12 @@ def run_webcam(
     max_queue_size: int = 4,
     verbose: bool = False,
 ) -> None:
-    """Run live webcam + microphone detection with the background worker."""
+    """Run live webcam + microphone detection with the background worker.
+
+    The inference result is overlaid on the live video window in the top-left
+    corner, showing the dominant emotion, confidence bar, and the three
+    attention metrics (stress, engagement, arousal).
+    """
     try:
         import cv2
     except ImportError:
@@ -268,8 +408,11 @@ def run_webcam(
         worker.stop()
         raise RuntimeError(f"Cannot open camera {camera_index}")
 
-    print(f"  {'Frame':>5}  {'Emotion':<10}  Confidence           "
-          f" Metrics (stress·engage·arousal)")
+    # Read actual camera resolution for the window title
+    cam_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    cam_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"  Camera   : {cam_w}×{cam_h}  index={camera_index}")
+    print(f"\n  {'Frame':>5}  {'Emotion':<10}  Confidence            Metrics")
     print("-" * 65)
 
     frame_idx = 0
@@ -281,24 +424,30 @@ def run_webcam(
             if not ret:
                 break
 
-            # Push to background worker — never blocks
-            worker.push_frame(bgr_frame, audio=None, timestamp=time.time())
+            # Capture microphone audio for this frame
+            audio: np.ndarray | None = None  # InferenceWorker handles None gracefully
 
-            # Poll latest result — always instant
+            # Push to background worker — never blocks the camera loop
+            worker.push_frame(bgr_frame, audio=audio, timestamp=time.time())
+
+            # Poll the latest result — always instant (no waiting)
             result = worker.latest_result
             if result is not None:
                 last_result = result
 
+            # ── Terminal status line ──────────────────────────────────
             _print_status(frame_idx, last_result, worker.stats)
             frame_idx += 1
 
-            # OpenCV display (optional — remove if headless)
-            display = bgr_frame.copy()
+            # ── OpenCV window with top-left overlay ───────────────────
             if last_result is not None:
-                label = f"{last_result.dominant_emotion}  {last_result.confidence:.0%}"
-                cv2.putText(display, label, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            (0, 255, 0), 2)
+                display = _draw_overlay(bgr_frame, last_result)
+            else:
+                display = bgr_frame.copy()
+                cv2.putText(display, "Warming up…", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 1,
+                            cv2.LINE_AA)
+
             cv2.imshow("Emotion Detector", display)
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
                 break
