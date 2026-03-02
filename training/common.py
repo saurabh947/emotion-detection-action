@@ -75,7 +75,7 @@ EMOTION_METRIC_DEFAULTS: dict[str, list[float]] = {
     "unclear":   [0.00, 0.00, 0.00],
 }
 
-VIDEO_EXTENSIONS: set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+VIDEO_EXTENSIONS: set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
 
 # ---------------------------------------------------------------------------
 # Dataset helpers
