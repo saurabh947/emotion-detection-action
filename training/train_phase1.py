@@ -70,6 +70,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from tqdm import tqdm
 
 from emotion_detection_action.models.backbones import BackboneConfig
 from emotion_detection_action.models.fusion import NeuralFusionModel
@@ -122,6 +123,15 @@ def suppress_warnings(is_main: bool = True) -> None:
         os.environ["TRANSFORMERS_VERBOSITY"] = "error"
     # Rank 0 keeps the transformers/huggingface_hub defaults so that
     # weight-loading info and download progress bars remain visible.
+
+    # Suppress OpenCV / libavformat C-library noise ("moov atom not found", etc.)
+    # Must be set before DataLoader workers fork.
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+    try:
+        import cv2  # type: ignore[import]
+        cv2.setLogLevel(0)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +443,14 @@ def main() -> None:
         loss_m = AverageMeter()
         acc_m  = AverageMeter()
 
-        for batch in train_loader:
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch:3d}/{args.epochs}",
+            disable=not is_main,
+            ncols=110,
+            leave=False,
+        )
+        for batch in pbar:
             video = batch["video"].to(device, non_blocking=True)
             audio = batch["audio"]
             if audio is not None:
@@ -451,6 +468,9 @@ def main() -> None:
             n = video.shape[0]
             loss_m.update(loss.item(), n)
             acc_m.update(accuracy(out.emotion_logits, emotion_t), n)
+
+            if is_main:
+                pbar.set_postfix(loss=f"{loss_m.avg:.4f}", acc=f"{acc_m.avg:.1%}")
 
         if scheduler is not None:
             scheduler.step()

@@ -12,6 +12,7 @@
 #   sync            Push local code to the remote VM (excludes data/venv/outputs)
 #   sync-data       Push data/combined dataset to the remote VM
 #   setup           Bootstrap the remote VM (install deps, create venv)
+#   push-checkpoint Upload a local .pt checkpoint to outputs/ on the remote VM
 #   train-phase1    Run Phase 1 training on the remote VM
 #   train-phase2    Run Phase 2 training on the remote VM
 #   download        Pull outputs/ checkpoints back to your local machine
@@ -415,6 +416,36 @@ cmd_train_phase2() {
     "
 }
 
+cmd_push_checkpoint() {
+    local local_pt="${1:-}"
+    if [[ -z "$local_pt" ]]; then
+        # Default to phase1_best.pt if no argument given
+        local_pt="$PROJECT_ROOT/outputs/phase1_best.pt"
+    fi
+
+    if [[ ! -f "$local_pt" ]]; then
+        echo "  ERROR: File not found: $local_pt"
+        echo "  Usage: ./scripts/remote.sh push-checkpoint [path/to/checkpoint.pt]"
+        exit 1
+    fi
+
+    local filename
+    filename="$(basename "$local_pt")"
+    local remote_dest="$REMOTE_DIR/outputs/$filename"
+
+    local size
+    size="$(du -sh "$local_pt" | cut -f1)"
+    echo "  Uploading checkpoint: $filename ($size) → remote:outputs/"
+    echo "  (This may take a few minutes over the SSH proxy)"
+    echo ""
+
+    ssh_run "mkdir -p $REMOTE_DIR/outputs"
+    push_file "$local_pt" "$remote_dest"
+
+    echo ""
+    echo "  Upload complete: $remote_dest"
+}
+
 cmd_download() {
     echo "  Downloading outputs/ from remote VM …"
     echo ""
@@ -476,6 +507,7 @@ case "$COMMAND" in
     sync)          cmd_sync "$@" ;;
     sync-data)     cmd_sync_data "$@" ;;
     setup)         cmd_setup "$@" ;;
+    push-checkpoint) cmd_push_checkpoint "$@" ;;
     train-phase1)  cmd_train_phase1 "$@" ;;
     train-phase2)  cmd_train_phase2 "$@" ;;
     download)      cmd_download "$@" ;;
