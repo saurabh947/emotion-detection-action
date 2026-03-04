@@ -1,0 +1,21 @@
+#cloud-config
+# =============================================================================
+# SF Compute cloud-init startup config
+# =============================================================================
+# Injects your SSH public key so you can connect to the VM.
+#
+# Usage — redeploy your existing node with this file:
+#   sf nodes redeploy <your-node-name> --user-data-file ./scripts/startup.yaml
+#
+# Or create a new node with it:
+#   sf nodes create <name> --zone landsend --duration 6h --max-price 20 \
+#       --user-data-file ./scripts/startup.yaml
+# =============================================================================
+
+disable_root: false
+ssh_pwauth: false
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF/0/P/oypIKaXTQDBdcPFdpg2Ojgkg92wJXzfhHdTOP asaurabh527@gmail.com

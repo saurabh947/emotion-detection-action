@@ -1,22 +1,35 @@
-"""
-Emotion Detector SDK - Real-time human emotion detection for robotics.
+"""Emotion Detection Action SDK.
 
-This SDK combines facial recognition, speech analysis, and attention tracking
-using AI models, then fuses them via a neural network into unified emotion
-predictions. The ML-based fusion works out-of-the-box with sensible defaults.
+A pure-neural, platform-agnostic multimodal emotion detection SDK built on a
+Two-Tower Transformer (VideoMAE + AST) with bidirectional cross-attention and a
+GRU temporal context buffer.
 
-Key components:
-- Face detection (MediaPipe - lightweight, fast)
-- Voice activity detection (Silero VAD - noise-resistant deep learning model)
-- Facial emotion recognition (ViT model - 7 emotions)
-- Speech emotion recognition (Wav2Vec2 model - 4 emotions)
-- Attention analysis (stress, engagement, nervousness metrics)
-- ML-based multimodal fusion (neural network)
-- VLA-based action generation (optional, for robotics)
+Quick start::
+
+    from emotion_detection_action import EmotionDetector, Config
+
+    detector = EmotionDetector(Config(two_tower_pretrained=False))  # stub mode
+    detector.initialize()
+
+    import numpy as np
+    frames = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
+    result = detector.process(frames)
+    print(result.dominant_emotion)
+    print(result.latent_embedding[:4])   # 512-dim VLA context vector
+    print(result.metrics)                # stress, engagement, arousal
+
+Primary public API
+------------------
+* :class:`EmotionDetector` — the main SDK entry point.
+* :class:`Config` — all configuration knobs.
+* :class:`NeuralEmotionResult` — Pydantic output contract.
+* :class:`NeuralFusionModel` — the underlying PyTorch model.
+* :class:`BackboneConfig` — configure video/audio backbones directly.
 """
 
 from emotion_detection_action.core.config import Config
 from emotion_detection_action.core.detector import EmotionDetector
+from emotion_detection_action.core.inference_worker import InferenceWorker, WorkerStats
 from emotion_detection_action.core.types import (
     ActionCommand,
     AttentionMetrics,
@@ -25,14 +38,30 @@ from emotion_detection_action.core.types import (
     EmotionResult,
     FaceDetection,
     GazeDetection,
+    NeuralEmotionResult,
     VoiceDetection,
 )
+from emotion_detection_action.models import (
+    BackboneConfig,
+    NeuralFusionModel,
+    NeuralModelOutput,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    # Core
     "EmotionDetector",
+    "InferenceWorker",
+    "WorkerStats",
     "Config",
+    # Primary output contract
+    "NeuralEmotionResult",
+    # Model (for direct use / fine-tuning)
+    "NeuralFusionModel",
+    "NeuralModelOutput",
+    "BackboneConfig",
+    # Legacy types (kept for backward compatibility)
     "EmotionResult",
     "DetectionResult",
     "ActionCommand",
@@ -42,4 +71,3 @@ __all__ = [
     "AttentionResult",
     "AttentionMetrics",
 ]
-
