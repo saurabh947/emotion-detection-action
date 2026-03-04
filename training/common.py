@@ -51,6 +51,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data.distributed import DistributedSampler
 
 # ---------------------------------------------------------------------------
 # Emotion / label constants
@@ -129,7 +130,7 @@ def _load_audio_mel(
     n_mels: int = 128,
     n_fft: int = 400,
     hop_length: int = 160,
-    target_length: int = 100,
+    target_length: int = 1024,
 ) -> torch.Tensor | None:
     """Load audio from a file and return a ``(time, mel)`` log mel-spectrogram.
 
@@ -196,7 +197,7 @@ class SyntheticEmotionDataset(Dataset):
         size: int = 200,
         num_frames: int = 16,
         image_size: int = 224,
-        mel_time: int = 100,
+        mel_time: int = 1024,
         n_mels: int = 128,
         seed: int = 42,
     ) -> None:
@@ -252,7 +253,7 @@ class EmotionVideoDataset(Dataset):
         samples: list[tuple[str, int, list[float]]],
         num_frames: int = 16,
         image_size: int = 224,
-        mel_time: int = 100,
+        mel_time: int = 1024,
         n_mels: int = 128,
         augment: bool = False,
     ) -> None:
@@ -389,31 +390,47 @@ def build_dataloaders(
     batch_size: int = 4,
     num_workers: int = 0,
     seed: int = 42,
-) -> tuple[DataLoader, DataLoader]:
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+) -> tuple[DataLoader, DataLoader, DistributedSampler | None]:
     """Split ``dataset`` into train/val and return two DataLoaders.
 
     Args:
         dataset: Full dataset (train + val combined).
         val_split: Fraction held out for validation.
-        batch_size: Samples per batch.
-        num_workers: Parallel data loading workers (0 = main thread).
+        batch_size: Samples **per GPU** (effective batch = batch_size × world_size).
+        num_workers: Parallel data loading workers per process.
         seed: Random seed for reproducible splits.
+        distributed: If True, use DistributedSampler (for torchrun / DDP).
+        rank: This process's rank (only used when distributed=True).
+        world_size: Total number of processes (only used when distributed=True).
 
     Returns:
-        ``(train_loader, val_loader)``
+        ``(train_loader, val_loader, train_sampler)``
+        ``train_sampler`` is ``None`` in non-distributed mode.
+        Call ``train_sampler.set_epoch(epoch)`` each epoch to re-shuffle.
     """
     n_val = max(1, int(len(dataset) * val_split))
     n_train = len(dataset) - n_val
     generator = torch.Generator().manual_seed(seed)
     train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=generator)
 
+    train_sampler: DistributedSampler | None = None
+    if distributed:
+        # Each rank sees a non-overlapping subset — DistributedSampler handles shuffling
+        train_sampler = DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True, seed=seed
+        )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),   # shuffle=False when sampler is set
+        sampler=train_sampler,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=False,
+        pin_memory=distributed,            # pin_memory speeds up GPU transfers in DDP
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -422,9 +439,9 @@ def build_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=False,
+        pin_memory=distributed,
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, train_sampler
 
 
 # ---------------------------------------------------------------------------
@@ -479,11 +496,17 @@ def save_checkpoint(
     config_dict: dict,
     extra: dict | None = None,
 ) -> None:
-    """Save model + optimiser state to a ``.pt`` checkpoint file."""
+    """Save model + optimiser state to a ``.pt`` checkpoint file.
+
+    Handles DDP-wrapped models automatically — always saves the underlying
+    module's state dict so checkpoints are device-agnostic.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Unwrap DDP if needed so checkpoints are always plain NeuralFusionModel states
+    raw_model = model.module if hasattr(model, "module") else model
     payload: dict = {
         "epoch": epoch,
-        "model_state": model.state_dict(),
+        "model_state": raw_model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "best_val_acc": best_val_acc,
         "config": config_dict,
