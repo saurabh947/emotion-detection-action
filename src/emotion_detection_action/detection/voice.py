@@ -50,15 +50,29 @@ class VoiceActivityDetector(BaseModel[AudioChunk, VoiceDetection | None]):
         self._model: Any = None
 
     def load(self) -> None:
-        """Load the Silero VAD model via torch.hub."""
+        """Load the Silero VAD model via torch.hub.
+
+        Raises:
+            RuntimeError: If the model cannot be downloaded or loaded.
+        """
         if self._is_loaded:
             return
 
-        model, _ = torch.hub.load(
-            repo_or_dir=SILERO_REPO,
-            model="silero_vad",
-            trust_repo=True,
-        )
+        try:
+            # trust_repo="check" shows a one-time user-facing consent prompt
+            # instead of silently executing remote code (trust_repo=True).
+            model, _ = torch.hub.load(
+                repo_or_dir=SILERO_REPO,
+                model="silero_vad",
+                trust_repo="check",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load Silero VAD model from '{SILERO_REPO}'. "
+                "Check your internet connection or the Silero repository. "
+                f"Original error: {exc}"
+            ) from exc
+
         self._model = model
         self._is_loaded = True
 

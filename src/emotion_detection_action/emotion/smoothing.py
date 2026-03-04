@@ -122,7 +122,7 @@ class EmotionSmoother:
         if len(self._history) == 1:
             return scores
 
-        # Average across all scores in history
+        # Average across all scores in history — include all 8 classes.
         avg_dict: dict[str, float] = {
             "happy": 0.0,
             "sad": 0.0,
@@ -131,12 +131,13 @@ class EmotionSmoother:
             "surprised": 0.0,
             "disgusted": 0.0,
             "neutral": 0.0,
+            "unclear": 0.0,
         }
 
         for hist_scores in self._history:
             hist_dict = hist_scores.to_dict()
             for key in avg_dict:
-                avg_dict[key] += hist_dict[key]
+                avg_dict[key] += hist_dict.get(key, 0.0)
 
         n = len(self._history)
         for key in avg_dict:
@@ -199,14 +200,14 @@ class EmotionSmoother:
 
         # Different emotion - check threshold
         current_dict = scores.to_dict()
-        assert self._last_scores is not None
-        last_dict = self._last_scores.to_dict()
 
         current_conf = current_dict[current_dominant.value]
-        last_conf = last_dict[self._current_emotion.value]
+        # Compare the new emotion against the old emotion in the *current* frame
+        # (not the previous frame) to correctly measure the confidence gap.
+        current_emotion_conf = current_dict[self._current_emotion.value]
 
         # Check if difference exceeds threshold
-        if current_conf - last_conf < self.config.hysteresis_threshold:
+        if current_conf - current_emotion_conf < self.config.hysteresis_threshold:
             # Not enough difference, keep current emotion
             return self._last_scores
 

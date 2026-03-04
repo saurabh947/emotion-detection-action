@@ -105,44 +105,36 @@ class TestPipelineIntegration:
         assert d["action"]["type"] == "wait"
 
     @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_multimodal_pipeline_flow(self):
-        """Test multimodal pipeline with both visual and audio."""
-        from emotion_detection_action.emotion.fusion import EmotionFusion
+    def test_neural_pipeline_flow(self):
+        """Test neural pipeline (NeuralFusionModel) with stub backbones."""
+        import numpy as np
+        import torch
+        from emotion_detection_action import Config, EmotionDetector
 
-        # Create facial result
-        bbox = BoundingBox(x=0, y=0, width=100, height=100)
-        face = FaceDetection(bbox=bbox, confidence=0.95)
-        facial_scores = EmotionScores(happy=0.7, neutral=0.3)
-        facial_result = FacialEmotionResult(
-            face_detection=face,
-            emotions=facial_scores,
-            confidence=0.85,
+        config = Config(
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            vla_enabled=False,
         )
+        detector = EmotionDetector(config)
+        detector.initialize()
 
-        # Create speech result (simulated)
-        from emotion_detection_action.core.types import SpeechEmotionResult, VoiceDetection
+        # Single-frame API
+        frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+        result = detector.process_frame(frame)
+        # process_frame accumulates frames; result may be None until buffer is full
+        # Drive it to full by submitting enough frames
+        for _ in range(20):
+            result = detector.process_frame(frame)
 
-        voice = VoiceDetection(
-            is_speech=True,
-            confidence=0.9,
-            start_time=0.0,
-            end_time=1.0,
-        )
-        speech_scores = EmotionScores(happy=0.9, neutral=0.1)
-        speech_result = SpeechEmotionResult(
-            voice_detection=voice,
-            emotions=speech_scores,
-            confidence=0.8,
-        )
-
-        # Fuse using ML-based fusion
-        fusion = EmotionFusion()
-        fused = fusion.fuse(facial_result, speech_result, timestamp=0.5)
-
-        # Both modalities indicate happy - ML model should produce a valid result
-        assert fused is not None
-        assert fused.dominant_emotion is not None
-        assert fused.fusion_confidence > 0
+        assert result is not None
+        assert result.dominant_emotion in [
+            "angry", "disgusted", "fearful", "happy",
+            "neutral", "sad", "surprised", "unclear",
+        ]
+        assert 0.0 <= result.confidence <= 1.0
+        assert len(result.latent_embedding) == 512
+        assert set(result.metrics.keys()) == {"stress", "engagement", "arousal"}
 
     def test_action_handler_integration(self):
         """Test action handler receives correct actions."""
@@ -240,48 +232,42 @@ class TestPipelineEdgeCases:
 
 
 class TestConfigIntegration:
-    """Test configuration integration with pipeline."""
+    """Test configuration integration with the neural pipeline."""
 
-    def test_config_fusion_settings(self):
-        """Test that config fusion settings are available."""
+    def test_neural_pipeline_config_settings(self):
+        """Neural pipeline (Two-Tower Transformer) config fields are accessible."""
         config = Config(
-            fusion_model_path="models/test.pt",
-            fusion_device="cpu",
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            two_tower_model_path="outputs/phase2_best.pt",
         )
-        assert config.fusion_model_path == "models/test.pt"
-        assert config.fusion_device == "cpu"
+        assert config.two_tower_pretrained is False
+        assert config.two_tower_device == "cpu"
+        assert config.two_tower_model_path == "outputs/phase2_best.pt"
 
     @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_fusion_produces_valid_output(self):
-        """Test that fusion produces valid emotion output."""
-        from emotion_detection_action.emotion.fusion import EmotionFusion
+    def test_neural_detector_produces_valid_output(self):
+        """NeuralFusionModel stub produces correctly-shaped NeuralEmotionResult."""
+        import numpy as np
+        from emotion_detection_action import Config, EmotionDetector
+        from emotion_detection_action.core.types import NeuralEmotionResult
 
-        fusion = EmotionFusion()
-
-        # Create conflicting results
-        bbox = BoundingBox(x=0, y=0, width=100, height=100)
-        face = FaceDetection(bbox=bbox, confidence=0.95)
-        facial = FacialEmotionResult(
-            face_detection=face,
-            emotions=EmotionScores(happy=1.0),
-            confidence=0.9,
+        config = Config(
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            vla_enabled=False,
         )
+        detector = EmotionDetector(config)
+        detector.initialize()
 
-        from emotion_detection_action.core.types import SpeechEmotionResult, VoiceDetection
+        clip = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
+        audio = np.random.randn(8000).astype("float32")
+        result = detector.process(clip, audio)
 
-        voice = VoiceDetection(is_speech=True, confidence=0.9, start_time=0.0, end_time=1.0)
-        speech = SpeechEmotionResult(
-            voice_detection=voice,
-            emotions=EmotionScores(sad=1.0),
-            confidence=0.9,
-        )
-
-        result = fusion.fuse(facial, speech)
-
-        # ML-based fusion should produce a valid result
-        assert result is not None
-        assert result.dominant_emotion is not None
-        # Emotions should sum to approximately 1
-        scores = result.emotions.to_dict()
-        total = sum(scores.values())
-        assert 0.99 < total < 1.01
+        assert isinstance(result, NeuralEmotionResult)
+        assert result.dominant_emotion in [
+            "angry", "disgusted", "fearful", "happy",
+            "neutral", "sad", "surprised", "unclear",
+        ]
+        assert len(result.latent_embedding) == 512
+        assert set(result.metrics.keys()) == {"stress", "engagement", "arousal"}

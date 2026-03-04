@@ -18,4 +18,7 @@ ssh_pwauth: false
 users:
   - name: root
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF/0/P/oypIKaXTQDBdcPFdpg2Ojgkg92wJXzfhHdTOP asaurabh527@gmail.com
+      # ⚠ Replace this placeholder with YOUR OWN public key before deploying.
+      # Run: cat ~/.ssh/id_ed25519.pub  (or whatever key you use for SF Compute)
+      # Then paste the full "ssh-ed25519 AAAA... user@host" line below.
+      - REPLACE_WITH_YOUR_OWN_SSH_PUBLIC_KEY

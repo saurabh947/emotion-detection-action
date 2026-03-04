@@ -1,6 +1,7 @@
 """Attention detection using MediaPipe Face Mesh for eye/gaze tracking."""
 
-import tempfile
+import hashlib
+import time
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -27,6 +28,9 @@ except ImportError:
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 MODEL_NAME = "face_landmarker.task"
+# SHA-256 of the expected model file.  Update this when MediaPipe releases a
+# new version.  Run: sha256sum face_landmarker.task  to obtain the hash.
+MODEL_SHA256: str | None = None  # Set to the expected hex digest to enable verification.
 
 
 # MediaPipe Face Mesh landmark indices for eyes
@@ -172,12 +176,25 @@ class AttentionDetector(BaseModel):
 
         if not model_path.exists():
             try:
-                urllib.request.urlretrieve(MODEL_URL, model_path)
+                with urllib.request.urlopen(MODEL_URL, timeout=60) as resp:  # noqa: S310
+                    data = resp.read()
+                model_path.write_bytes(data)
             except Exception as e:
+                model_path.unlink(missing_ok=True)
                 raise RuntimeError(
                     f"Failed to download MediaPipe face landmarker model: {e}\n"
                     f"You can manually download from {MODEL_URL} and place at {model_path}"
                 ) from e
+
+        if MODEL_SHA256 is not None:
+            digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            if digest != MODEL_SHA256:
+                model_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"MediaPipe face landmarker model checksum mismatch. "
+                    f"Expected {MODEL_SHA256}, got {digest}. "
+                    "The file may be corrupt or tampered with."
+                )
 
         return model_path
 
@@ -421,8 +438,6 @@ class AttentionDetector(BaseModel):
         Returns:
             True if blink detected.
         """
-        import time
-
         was_closed = self._state.last_eye_openness < self._blink_threshold
         is_closed = openness < self._blink_threshold
 
@@ -444,8 +459,6 @@ class AttentionDetector(BaseModel):
         Returns:
             Blinks per minute.
         """
-        import time
-
         current_time = time.time()
         cutoff = current_time - window_seconds
 

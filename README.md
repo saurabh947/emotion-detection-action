@@ -33,12 +33,12 @@ for robotics, built on a Two-Tower Multimodal Transformer.
 │                              ▼                         ▼                     │
 │                   ┌──────────────────┐     ┌────────────────────────────┐    │
 │                   │  Emotion head    │     │     Metrics head           │    │
-│                   │  Softmax (7)     │     │     Sigmoid (3)            │    │
+│                   │  Softmax (8)     │     │     Sigmoid (3)            │    │
 │                   └──────────────────┘     └────────────────────────────┘    │
 │                   angry · disgusted ·       stress · engagement · arousal    │
 │                   fearful · happy ·                                          │
 │                   neutral · sad ·                                            │
-│                   surprised                                                  │
+│                   surprised · unclear                                        │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,7 +49,7 @@ Every call returns a **Pydantic** `NeuralEmotionResult`:
 ```python
 NeuralEmotionResult(
     dominant_emotion = "happy",
-    emotion_scores   = {"angry": 0.02, "happy": 0.81, ...},   # 7 classes
+    emotion_scores   = {"angry": 0.02, "happy": 0.81, ..., "unclear": 0.01},  # 8 classes
     latent_embedding = [0.12, -0.34, ...],                     # 512-dim VLA vector
     metrics          = {"stress": 0.23, "engagement": 0.71, "arousal": 0.45},
     confidence       = 0.81,
@@ -58,6 +58,15 @@ NeuralEmotionResult(
     audio_missing    = False,
 )
 ```
+
+> **Tip:** Always gate on the `"unclear"` label before acting.  The model
+> predicts `"unclear"` when no person is present, the signal is too noisy, or
+> confidence is low.
+>
+> ```python
+> if result.dominant_emotion != "unclear":
+>     robot.react_to(result.dominant_emotion)
+> ```
 
 The `latent_embedding` is a 512-dim GRU-smoothed fused vector — feed this
 directly into VLA models (e.g., OpenVLA) as the emotion context.
@@ -151,76 +160,59 @@ python3 examples/neural_stream_demo.py --video-model vivit --pretrained
 ### Real-time webcam demo (OpenCV visualisation)
 
 ```bash
-python3 examples/realtime_multimodal.py --no-pretrained   # stub, instant
-python3 examples/realtime_multimodal.py                   # pretrained
+# Stub backbones — instant, no download
+python3 examples/neural_stream_demo.py --webcam
+
+# Pretrained backbones (downloads ~1.8 GB once)
+python3 examples/neural_stream_demo.py --webcam --pretrained
+
+# With your fine-tuned checkpoint
+python3 examples/neural_stream_demo.py --webcam --pretrained --model-path outputs/phase2_best.pt
 ```
 
 ### Python API
 
 ```python
-import numpy as np
 from emotion_detection_action import Config, EmotionDetector
+import numpy as np
 
-config = Config(
-    two_tower_pretrained=True,      # VideoMAE + AST from HuggingFace
-    two_tower_device="cpu",         # "cuda" or "mps" recommended in production
-    two_tower_video_model="videomae",
+detector = EmotionDetector(Config(
+    two_tower_pretrained=True,   # downloads VideoMAE + AST weights once
+    two_tower_device="cpu",      # "cuda" or "mps" for GPU
     vla_enabled=False,
-)
-
-detector = EmotionDetector(config)
+))
 detector.initialize()
 
-# ── Clip API: pass a (T, H, W, 3) array ──────────────────────────────────────
-clip = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)  # RGB
-audio = np.random.randn(8000).astype("float32")                       # 0.5s PCM
+# Pass a (T, H, W, 3) RGB clip + optional raw PCM audio
+clip  = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
+audio = np.random.randn(8000).astype("float32")   # 0.5 s @ 16 kHz
 result = detector.process(clip, audio)
 
-print(result.dominant_emotion)          # "happy"
-print(result.metrics)                   # {"stress": 0.2, "engagement": 0.7, "arousal": 0.4}
-print(len(result.latent_embedding))     # 512  ← feed to VLA
-
-# ── Single-frame API (accumulates rolling buffer internally) ──────────────────
-import cv2
-cap = cv2.VideoCapture(0)
-while True:
-    ret, frame = cap.read()            # BGR frame from OpenCV
-    if not ret:
-        break
-    result = detector.process_frame(frame)
-    if result:
-        print(result.dominant_emotion, result.confidence)
-
-# ── Subject change ─────────────────────────────────────────────────────────────
-detector.reset()   # clears frame/audio buffers + GRU hidden state
-
-# ── Quantize for deployment ────────────────────────────────────────────────────
-detector.quantize("dynamic")   # INT8 linear layers, ~2-3× faster on CPU
+print(result.dominant_emotion)   # e.g. "happy" — "unclear" when no person / low confidence
+print(result.confidence)         # 0.0 – 1.0
+print(result.metrics)            # {"stress": …, "engagement": …, "arousal": …}
+print(result.latent_embedding)   # 512-dim vector → feed directly to a VLA model
 ```
+
+> For frame-by-frame webcam use, call `detector.process_frame(bgr_frame)` in a loop —
+> it accumulates a rolling buffer internally.  See `examples/neural_stream_demo.py`.
 
 ### Custom robot action handler
 
 ```python
-from emotion_detection_action import NeuralEmotionResult
 from emotion_detection_action.actions.base import BaseActionHandler
+from emotion_detection_action.core.types import ActionCommand, NeuralEmotionResult
 
 class ReachyHandler(BaseActionHandler):
-    def connect(self) -> None:
-        # Connect to your robot SDK here
-        ...
-
+    def connect(self) -> bool:    ...   # open connection to your robot SDK
     def disconnect(self) -> None: ...
 
-    def execute(self, result: NeuralEmotionResult) -> None:
-        if result.dominant_emotion == "sad" and result.confidence > 0.6:
-            self._send_comfort_gesture()
-        if result.metrics["stress"] > 0.8:
-            self._reduce_interaction_intensity()
+    def execute(self, action: ActionCommand) -> bool:
+        # action.action_type is set by the SDK's default emotion→action mapping.
+        # Override react() instead if you want to work with NeuralEmotionResult directly.
+        ...
 
-    def _send_comfort_gesture(self): ...
-    def _reduce_interaction_intensity(self): ...
-
-detector = EmotionDetector(action_handler=ReachyHandler())
+detector = EmotionDetector(Config(...), action_handler=ReachyHandler())
 ```
 
 ---
@@ -232,8 +224,8 @@ detector = EmotionDetector(action_handler=ReachyHandler())
 | `two_tower_video_model` | `"videomae"` | `"videomae"` or `"vivit"` |
 | `two_tower_video_backbone` | `"MCG-NJU/videomae-base"` | HuggingFace model ID |
 | `two_tower_audio_backbone` | `"MIT/ast-finetuned-audioset-10-10-0.4593"` | HuggingFace model ID |
-| `two_tower_pretrained` | `True` | Download pretrained weights |
-| `two_tower_model_path` | `None` | Path to fine-tuned checkpoint |
+| `two_tower_pretrained` | `True` | Download pretrained HuggingFace weights |
+| `two_tower_model_path` | `None` | Path to a fine-tuned `NeuralFusionModel` checkpoint (e.g. `outputs/phase2_best.pt`) |
 | `two_tower_device` | `"cpu"` | `"cpu"`, `"cuda"`, or `"mps"` |
 | `two_tower_d_model` | `512` | Shared projection / cross-attention dim |
 | `two_tower_cross_attn_layers` | `2` | Bidirectional cross-attention layers |
@@ -242,39 +234,49 @@ detector = EmotionDetector(action_handler=ReachyHandler())
 | `two_tower_video_freeze_layers` | `8` | VideoMAE encoder layers to freeze |
 | `two_tower_audio_freeze_layers` | `6` | AST encoder layers to freeze |
 | `two_tower_n_mels` | `128` | Mel bins for audio spectrogram |
+| `two_tower_n_fft` | `400` | FFT window size for mel spectrogram |
+| `two_tower_hop_length` | `160` | Hop length for mel spectrogram (10 ms @ 16 kHz) |
 
 ---
 
 ## Training / fine-tuning
 
-```python
-from emotion_detection_action.models.fusion import NeuralFusionModel
-from emotion_detection_action.models.backbones import BackboneConfig
-import torch
+Two-phase training with scripts in `training/`.  Place labelled video clips in:
 
-model = NeuralFusionModel(BackboneConfig(pretrained=True))
-model.freeze_backbones()   # only train cross-attention + heads initially
-
-groups = model.get_trainable_parameter_groups(backbone_lr=1e-5, head_lr=1e-4)
-optimizer = torch.optim.AdamW(groups, weight_decay=1e-4)
-
-# Training loop
-for video_clip, audio_mel, emotion_labels, metric_labels in dataloader:
-    out = model(video_clip, audio_mel, use_temporal=False)  # disable GRU for batch training
-    loss = (
-        F.cross_entropy(out.emotion_logits, emotion_labels)
-        + F.mse_loss(out.metrics, metric_labels)
-    )
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-    model.detach_temporal_state()
-
-# Save checkpoint
-torch.save(model.state_dict(), "emotion_model.pt")
+```
+data/combined/{emotion}/   ← one folder per class (angry, happy, …, unclear)
 ```
 
-Point `Config.two_tower_model_path` to `"emotion_model.pt"` to load it in production.
+Supported sources: **RAVDESS**, **CREMA-D**, **MELD**.
+
+### Phase 1 — freeze backbones, train heads
+
+```bash
+python3 training/train_phase1.py --data-dir data/combined --epochs 20 --batch-size 4
+# Multi-GPU: torchrun --standalone --nproc_per_node=N training/train_phase1.py ...
+```
+
+### Phase 2 — unfreeze top layers, fine-tune end-to-end
+
+```bash
+python3 training/train_phase2.py --data-dir data/combined --epochs 10 --no-scale-lr
+# Automatically loads outputs/phase1_best.pt; saves outputs/phase2_best.pt
+```
+
+### Load a fine-tuned checkpoint
+
+```python
+detector = EmotionDetector(Config(
+    two_tower_pretrained=True,
+    two_tower_model_path="outputs/phase2_best.pt",
+    two_tower_device="cpu",
+))
+detector.initialize()
+```
+
+```bash
+python3 training/reset_model.py   # factory reset — deletes outputs/ checkpoints
+```
 
 ---
 

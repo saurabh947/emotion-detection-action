@@ -1,5 +1,6 @@
 """Face detection module using MediaPipe."""
 
+import hashlib
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -25,6 +26,9 @@ except ImportError:
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
 MODEL_NAME = "blaze_face_short_range.tflite"
+# SHA-256 of the expected model file.  Update this when MediaPipe releases a
+# new version.  Run: sha256sum blaze_face_short_range.tflite  to obtain the hash.
+MODEL_SHA256: str | None = None  # Set to the expected hex digest to enable verification.
 
 
 class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
@@ -120,12 +124,25 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
 
         if not model_path.exists():
             try:
-                urllib.request.urlretrieve(MODEL_URL, model_path)
+                with urllib.request.urlopen(MODEL_URL, timeout=60) as resp:  # noqa: S310
+                    data = resp.read()
+                model_path.write_bytes(data)
             except Exception as e:
+                model_path.unlink(missing_ok=True)
                 raise RuntimeError(
                     f"Failed to download MediaPipe face detection model: {e}\n"
                     f"You can manually download from {MODEL_URL} and place at {model_path}"
                 ) from e
+
+        if MODEL_SHA256 is not None:
+            digest = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            if digest != MODEL_SHA256:
+                model_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"MediaPipe face model checksum mismatch. "
+                    f"Expected {MODEL_SHA256}, got {digest}. "
+                    "The file may be corrupt or tampered with."
+                )
 
         return model_path
 
@@ -153,11 +170,8 @@ class FaceDetector(BaseModel[np.ndarray, list[FaceDetection]]):
         Raises:
             RuntimeError: If model is not loaded.
         """
-        if not self._is_loaded:
+        if not self._is_loaded or self._detector is None:
             raise RuntimeError("Model not loaded. Call load() first.")
-
-        if self._detector is None:
-            return []
 
         if len(input_data.shape) == 2:
             input_data = np.stack([input_data] * 3, axis=-1)

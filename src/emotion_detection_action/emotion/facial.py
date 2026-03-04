@@ -130,14 +130,11 @@ class FacialEmotionRecognizer(BaseModel[FaceDetection, FacialEmotionResult]):
         if input_data.face_image is None:
             raise ValueError("Face detection must include face_image")
 
-        # Preprocess image
+        # face_image is already in RGB format — FaceDetector crops from the
+        # RGB frame provided by the caller (EmotionDetector always converts
+        # BGR→RGB before detection).  Do NOT apply a second BGR→RGB conversion
+        # here as that would incorrectly swap channels.
         face_image = input_data.face_image
-
-        # Convert BGR to RGB if needed (OpenCV format)
-        if len(face_image.shape) == 3 and face_image.shape[2] == 3:
-            # Assume BGR, convert to RGB
-            import cv2
-            face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
 
         # Process with HuggingFace processor
         inputs = self._processor(

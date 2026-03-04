@@ -18,6 +18,7 @@ class ModelConfig:
     dtype: str = "float32"
     cache_dir: str | None = None
     load_in_8bit: bool = False
+    load_in_4bit: bool = False
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -30,8 +31,9 @@ class Config:
     frames; the audio tower (AST) processes the corresponding mel-spectrogram.
     Bidirectional cross-attention fuses both modalities into a shared embedding
     from which two task heads decode:
-      - 7-class emotion probabilities
-      - 3 continuous attention metrics (stress, engagement, nervousness)
+      - 8-class emotion probabilities (angry, disgusted, fearful, happy, neutral,
+        sad, surprised, unclear)
+      - 3 continuous attention metrics (stress, engagement, arousal)
 
     The model runs out-of-the-box with stub (randomly-initialised) backbones
     for architecture verification.  For production, set ``two_tower_pretrained``
@@ -48,8 +50,11 @@ class Config:
     # ------------------------------------------------------------------ #
     # Device settings                                                      #
     # ------------------------------------------------------------------ #
-    device: str = "cuda"   # "cuda", "cpu", "mps"
-    dtype: str = "float16"
+    # NOTE: `device` is used only by legacy/VLA sub-models (get_face_detection_config,
+    # get_vla_config). Neural inference always uses `two_tower_device` (default "cpu").
+    # Do not rely on `device` for the emotion recognition model.
+    device: str = "cpu"    # used by face detection and VLA sub-models
+    dtype: str = "float32"
 
     # ------------------------------------------------------------------ #
     # Face detection (MediaPipe)                                           #
@@ -114,7 +119,7 @@ class Config:
     # Attention analysis settings                                          #
     # ------------------------------------------------------------------ #
     # MediaPipe-based gaze tracking (used for gaze visualisation overlay).
-    # Attention *scores* (stress, engagement, nervousness) come from the
+    # Attention *scores* (stress, engagement, arousal) come from the
     # Two-Tower attention head — not from a deterministic algorithm.
     attention_analysis_enabled: bool = True
     mediapipe_delegate: Literal["cpu", "gpu"] = "cpu"
@@ -150,9 +155,25 @@ class Config:
             raise ValueError("smoothing_hysteresis_frames must be >= 1")
         if self.two_tower_video_frames < 1:
             raise ValueError("two_tower_video_frames must be >= 1")
+        if self.max_faces < 1:
+            raise ValueError("max_faces must be >= 1")
+        if self.sample_rate < 1:
+            raise ValueError("sample_rate must be >= 1")
+        if self.two_tower_d_model < 1:
+            raise ValueError("two_tower_d_model must be >= 1")
+        if self.two_tower_d_model % 8 != 0:
+            raise ValueError("two_tower_d_model must be divisible by 8 (num_heads=8)")
+        if self.two_tower_cross_attn_layers < 1:
+            raise ValueError("two_tower_cross_attn_layers must be >= 1")
+        if self.two_tower_gru_layers < 1:
+            raise ValueError("two_tower_gru_layers must be >= 1")
+        if self.two_tower_video_freeze_layers < 0:
+            raise ValueError("two_tower_video_freeze_layers must be >= 0")
+        if self.two_tower_audio_freeze_layers < 0:
+            raise ValueError("two_tower_audio_freeze_layers must be >= 0")
         # Auto-set correct frame count for ViViT (needs 32 frames).
         if self.two_tower_video_model == "vivit" and self.two_tower_video_frames == 16:
-            object.__setattr__(self, "two_tower_video_frames", 32)
+            self.two_tower_video_frames = 32
 
     def get_face_detection_config(self) -> ModelConfig:
         """Get configuration for the face detection model."""

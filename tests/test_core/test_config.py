@@ -35,7 +35,7 @@ class TestConfig:
         """Test default configuration values."""
         config = Config()
         assert config.vla_model == "openvla/openvla-7b"
-        assert config.device == "cuda"
+        assert config.device == "cpu"  # default is cpu; set two_tower_device for neural inference
         assert config.face_detection_threshold == 0.5
         assert config.face_detection_model == "mediapipe"
 
@@ -82,11 +82,25 @@ class TestConfig:
         assert d["device"] == "cpu"
         assert "vla_model" in d
 
-    def test_fusion_settings(self):
-        """Test fusion-related settings."""
+    def test_neural_pipeline_settings(self):
+        """Test neural pipeline (Two-Tower Transformer) settings."""
         config = Config(
-            fusion_model_path="models/fusion.pt",
-            fusion_device="cuda",
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            two_tower_video_model="videomae",
+            two_tower_model_path="outputs/phase2_best.pt",
         )
-        assert config.fusion_model_path == "models/fusion.pt"
-        assert config.fusion_device == "cuda"
+        assert config.two_tower_pretrained is False
+        assert config.two_tower_device == "cpu"
+        assert config.two_tower_video_model == "videomae"
+        assert config.two_tower_model_path == "outputs/phase2_best.pt"
+
+    def test_vivit_auto_sets_frame_count(self):
+        """ViViT backbone auto-sets two_tower_video_frames to 32."""
+        config = Config(two_tower_video_model="vivit")
+        assert config.two_tower_video_frames == 32
+
+    def test_videomae_default_frames(self):
+        """VideoMAE uses 16 frames by default."""
+        config = Config(two_tower_video_model="videomae")
+        assert config.two_tower_video_frames == 16

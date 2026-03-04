@@ -107,7 +107,12 @@ def _load_video_frames(
     cap.release()
 
     if not raw_frames:
-        # Return black frames if the file is unreadable
+        import logging
+        logging.getLogger(__name__).warning(
+            "_load_video_frames: could not read any frames from %r — "
+            "substituting a black clip. Check the file is a valid video.",
+            path,
+        )
         return torch.zeros(num_frames, 3, image_size, image_size)
 
     # Uniform temporal sampling
@@ -527,7 +532,7 @@ def load_checkpoint(
     Returns the checkpoint dict so callers can read ``epoch``, ``best_val_acc``,
     ``config``, etc.
     """
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     if optimizer is not None and "optimizer_state" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state"])

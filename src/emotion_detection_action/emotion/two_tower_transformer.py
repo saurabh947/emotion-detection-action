@@ -40,8 +40,11 @@ from emotion_detection_action.models.fusion import (
 
 # Legacy label lists (kept for backward compatibility)
 EMOTION_ORDER: list[str] = _EMOTION_ORDER
-# Previous implementation used "nervousness"; new model uses "arousal".
-# ATTENTION_ORDER is kept for import compatibility; the values have changed.
+# Migration note: the third metric was renamed from "nervousness" to "arousal"
+# when the model was upgraded to the pure-neural pipeline.
+# Old values: ["stress", "engagement", "nervousness"]
+# New values: ["stress", "engagement", "arousal"]
+# ATTENTION_ORDER reflects the new values; update any code that hardcoded "nervousness".
 ATTENTION_ORDER: list[str] = _METRIC_ORDER
 
 
@@ -128,12 +131,33 @@ class TwoTowerEmotionTransformer(NeuralFusionModel):
         :class:`~models.backbones.BackboneConfig` directly.
     """
 
+    # Legacy name alias for METRIC_ORDER
+    ATTENTION_ORDER: list[str] = NeuralFusionModel.METRIC_ORDER
+
     def __init__(self, config: TwoTowerConfig | None = None) -> None:
-        backbone_cfg = (config or TwoTowerConfig()).to_backbone_config()
+        cfg = config or TwoTowerConfig()
+        backbone_cfg = cfg.to_backbone_config()
         super().__init__(
             config=backbone_cfg,
-            num_cross_attn_layers=(config or TwoTowerConfig()).num_cross_attn_layers,
+            num_cross_attn_layers=cfg.num_cross_attn_layers,
+            num_heads=cfg.num_heads,
+            ffn_dim=cfg.ffn_dim,
+            dropout=cfg.dropout,
         )
+
+    # ------------------------------------------------------------------ #
+    # Backward-compatible property aliases for the absent-modality tokens #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def video_absent_token(self) -> "torch.nn.Parameter":  # type: ignore[name-defined]
+        """Legacy alias for :attr:`absent_video`."""
+        return self.absent_video  # type: ignore[return-value]
+
+    @property
+    def audio_absent_token(self) -> "torch.nn.Parameter":  # type: ignore[name-defined]
+        """Legacy alias for :attr:`absent_audio`."""
+        return self.absent_audio  # type: ignore[return-value]
 
     def forward(  # type: ignore[override]
         self,

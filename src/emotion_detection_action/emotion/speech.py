@@ -233,30 +233,4 @@ class SpeechEmotionRecognizer(BaseModel[VoiceDetection, SpeechEmotionResult]):
 
         return emotion_dict
 
-    @staticmethod
-    def _resample(
-        audio: np.ndarray,
-        orig_rate: int,
-        target_rate: int,
-    ) -> np.ndarray:
-        """Resample audio to target sample rate.
-
-        Args:
-            audio: Input audio.
-            orig_rate: Original sample rate.
-            target_rate: Target sample rate.
-
-        Returns:
-            Resampled audio.
-        """
-        if orig_rate == target_rate:
-            return audio
-
-        duration = len(audio) / orig_rate
-        new_length = int(duration * target_rate)
-        return np.interp(
-            np.linspace(0, len(audio), new_length),
-            np.arange(len(audio)),
-            audio,
-        ).astype(np.float32)
 

@@ -69,6 +69,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+import numpy as np
+
 from emotion_detection_action.core.detector import EmotionDetector
 from emotion_detection_action.core.types import NeuralEmotionResult
 
@@ -82,8 +84,8 @@ from emotion_detection_action.core.types import NeuralEmotionResult
 class _FramePacket:
     """One unit of work queued for inference."""
 
-    frame: object       # np.ndarray (H, W, 3) BGR frame
-    audio: object       # np.ndarray | None — raw PCM samples
+    frame: np.ndarray           # shape (H, W, 3) BGR frame
+    audio: np.ndarray | None    # raw PCM samples, or None when no mic
     timestamp: float
 
 
@@ -184,10 +186,21 @@ class InferenceWorker:
         max_queue_size: int = 4,
         on_result: Callable[[NeuralEmotionResult], None] | None = None,
     ) -> None:
+        import warnings
+
         if num_workers < 1:
             raise ValueError("num_workers must be >= 1")
         if max_queue_size < 1:
             raise ValueError("max_queue_size must be >= 1")
+        if num_workers > 1:
+            warnings.warn(
+                f"InferenceWorker: num_workers={num_workers} shares one EmotionDetector "
+                "instance across multiple threads. The GRU temporal buffer is protected "
+                "by a lock, so correctness is guaranteed, but temporal continuity may be "
+                "interrupted when different threads process consecutive frames out of "
+                "order. Consider num_workers=1 if smooth temporal predictions matter.",
+                stacklevel=2,
+            )
 
         self._detector = detector
         self._num_workers = num_workers
@@ -260,8 +273,8 @@ class InferenceWorker:
 
     def push_frame(
         self,
-        frame: object,
-        audio: object = None,
+        frame: np.ndarray,
+        audio: np.ndarray | None = None,
         timestamp: float | None = None,
     ) -> bool:
         """Submit a frame for asynchronous inference.  Never blocks.
@@ -384,12 +397,19 @@ class InferenceWorker:
             t0 = time.perf_counter()
             try:
                 result = self._detector.process_frame(
-                    packet.frame,  # type: ignore[arg-type]
-                    packet.audio,  # type: ignore[arg-type]
+                    packet.frame,
+                    packet.audio,
                     timestamp=packet.timestamp,
                 )
-            except Exception:
-                # Never let a bad frame crash the worker thread
+            except Exception as exc:
+                # Never let a bad frame crash the worker thread, but log it.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "InferenceWorker: frame dropped due to inference error: %s", exc,
+                    exc_info=True,
+                )
+                with self._stats_lock:
+                    self._frames_processed += 1  # count as processed (not lost silently)
                 continue
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -408,8 +428,12 @@ class InferenceWorker:
                 if self._on_result is not None:
                     try:
                         self._on_result(result)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "InferenceWorker: on_result callback raised: %s", exc,
+                            exc_info=True,
+                        )
 
     # ------------------------------------------------------------------ #
     # Context manager                                                      #

@@ -1,8 +1,12 @@
 """HTTP/REST action handler for robot control via web APIs."""
 
 import json
+import logging
+import ssl
 from typing import Any, Callable
 from urllib import request, error
+
+_log = logging.getLogger(__name__)
 
 from emotion_detection_action.actions.base import BaseActionHandler
 from emotion_detection_action.core.types import ActionCommand
@@ -60,36 +64,42 @@ class HTTPActionHandler(BaseActionHandler):
     def connect(self) -> bool:
         """Verify connection to the HTTP endpoint.
 
-        Sends a simple request to verify the endpoint is reachable.
+        Sends a HEAD request to verify the endpoint is reachable.
 
         Returns:
-            True if endpoint is reachable.
+            True if the endpoint responded (any HTTP status code counts).
+            Returns False on network-level errors (DNS failure, refused connection).
         """
+        import warnings
+
+        if not self.verify_ssl:
+            warnings.warn(
+                "HTTPActionHandler: SSL certificate verification is disabled "
+                "(verify_ssl=False). This exposes the connection to man-in-the-middle "
+                "attacks. Never use in production with sensitive data.",
+                stacklevel=2,
+            )
+
         try:
-            # Try a simple HEAD request to verify endpoint
             req = request.Request(
                 self.endpoint,
                 method="HEAD",
                 headers=self.headers,
             )
-
-            # Disable SSL verification if requested
-            import ssl
-            context = None
-            if not self.verify_ssl:
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-
-            request.urlopen(req, timeout=self.timeout, context=context)
+            request.urlopen(req, timeout=self.timeout, context=self._ssl_context())
             self._is_connected = True
             return True
 
+        except error.HTTPError:
+            # HTTP error (4xx/5xx) still means the server is reachable.
+            self._is_connected = True
+            return True
         except error.URLError:
-            # Endpoint may not support HEAD, try anyway
-            self._is_connected = True
-            return True
-        except Exception:
+            # Network-level failure — endpoint is genuinely unreachable.
+            self._is_connected = False
+            return False
+        except Exception as exc:
+            _log.warning("HTTPActionHandler.connect() failed: %s", exc, exc_info=True)
             self._is_connected = False
             return False
 
@@ -113,7 +123,6 @@ class HTTPActionHandler(BaseActionHandler):
         payload = self._build_payload(action)
 
         try:
-            # Create request
             data = json.dumps(payload).encode("utf-8")
             headers = {
                 "Content-Type": "application/json",
@@ -126,16 +135,7 @@ class HTTPActionHandler(BaseActionHandler):
                 headers=headers,
             )
 
-            # Disable SSL verification if requested
-            import ssl
-            context = None
-            if not self.verify_ssl:
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-
-            # Send request
-            with request.urlopen(req, timeout=self.timeout, context=context) as response:
+            with request.urlopen(req, timeout=self.timeout, context=self._ssl_context()) as response:
                 response_data = response.read().decode("utf-8")
 
                 try:
@@ -152,17 +152,29 @@ class HTTPActionHandler(BaseActionHandler):
         except error.HTTPError as e:
             self._error_count += 1
             self._last_response = {"error": str(e), "code": e.code}
+            _log.warning("HTTPActionHandler.execute() HTTP error %s: %s", e.code, e)
             return False
 
         except error.URLError as e:
             self._error_count += 1
             self._last_response = {"error": str(e)}
+            _log.warning("HTTPActionHandler.execute() network error: %s", e)
             return False
 
         except Exception as e:
             self._error_count += 1
             self._last_response = {"error": str(e)}
+            _log.warning("HTTPActionHandler.execute() unexpected error: %s", e, exc_info=True)
             return False
+
+    def _ssl_context(self) -> ssl.SSLContext | None:
+        """Return an SSL context, or None to use the default verified context."""
+        if not self.verify_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        return None
 
     def _build_payload(self, action: ActionCommand) -> dict[str, Any]:
         """Build HTTP payload from action command.
@@ -282,8 +294,8 @@ class WebSocketActionHandler(BaseActionHandler):
         if self._ws is not None:
             try:
                 self._ws.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.debug("WebSocketActionHandler.disconnect() close error: %s", exc)
             self._ws = None
         self._is_connected = False
 
@@ -314,14 +326,14 @@ class WebSocketActionHandler(BaseActionHandler):
             self._ws.send(message)
             self._message_count += 1
 
-            # Try to receive response (non-blocking)
+            # Try to receive response (non-blocking); timeout is expected.
             try:
                 self._ws.settimeout(0.1)
                 response = self._ws.recv()
                 if self.on_message:
                     self.on_message(response)
             except Exception:
-                pass  # No response available
+                pass  # Timeout or no data available — not an error
 
             return True
 

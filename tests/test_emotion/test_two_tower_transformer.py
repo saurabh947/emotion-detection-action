@@ -16,7 +16,10 @@ from emotion_detection_action.emotion.two_tower_transformer import (
     TwoTowerConfig,
     TwoTowerEmotionTransformer,
     TwoTowerOutput,
-    _CrossAttentionBlock,
+)
+from emotion_detection_action.models.fusion import (
+    CrossAttentionBlock as _CrossAttentionBlock,
+    NeuralModelOutput,
 )
 
 
@@ -41,8 +44,13 @@ AUDIO_TIME = 32   # max_length — time dimension fed to AST
 AUDIO_MEL = 32    # num_mel_filterbanks — frequency dimension
 
 
-def _stub_config(**kwargs: int) -> TwoTowerConfig:
-    """Build a minimal no-download TwoTowerConfig, overriding any field via kwargs."""
+def _stub_config(**kwargs) -> TwoTowerConfig:  # type: ignore[type-arg]
+    """Build a minimal no-download TwoTowerConfig, overriding any field via kwargs.
+
+    Only passes fields that ``TwoTowerConfig`` actually declares.  Stub backbone
+    geometry (patch sizes, mel bins, etc.) is handled internally by the stub
+    backbones in ``models/backbones.py`` and does not need to be specified here.
+    """
     defaults: dict = dict(
         pretrained=False,
         d_model=D_MODEL,
@@ -51,16 +59,8 @@ def _stub_config(**kwargs: int) -> TwoTowerConfig:
         num_cross_attn_layers=1,
         video_freeze_layers=0,
         audio_freeze_layers=0,
-        _video_hidden_size=HIDDEN,
-        _audio_hidden_size=HIDDEN,
         _video_image_size=VIDEO_H,
         _video_num_frames=VIDEO_T,
-        _video_patch_size=16,
-        _video_tubelet_size=2,
-        _audio_num_mel_filterbanks=AUDIO_MEL,
-        _audio_max_length=AUDIO_TIME,
-        _audio_frequency_stride=16,
-        _audio_time_stride=16,
     )
     defaults.update(kwargs)
     return TwoTowerConfig(**defaults)
@@ -103,14 +103,19 @@ class TestTwoTowerConfig:
         cfg = TwoTowerConfig()
         assert cfg.d_model == 512
         assert cfg.num_heads == 8
-        assert cfg.num_emotions == 7
-        assert cfg.num_attention_metrics == 3
         assert cfg.pretrained is True
+        # 8 emotion classes (7 standard + unclear) exposed via EMOTION_ORDER
+        assert len(EMOTION_ORDER) == 8
+        # 3 attention metrics exposed via ATTENTION_ORDER
+        assert len(ATTENTION_ORDER) == 3
 
     def test_custom_values(self, small_config: TwoTowerConfig) -> None:
         assert small_config.d_model == D_MODEL
         assert small_config.pretrained is False
-        assert small_config._video_hidden_size == HIDDEN
+        # Stub backbone always uses hidden_size=512 internally;
+        # _video_hidden_size is a legacy field kept for API compat.
+        assert small_config._video_image_size == VIDEO_H
+        assert small_config._video_num_frames == VIDEO_T
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +179,7 @@ class TestTwoTowerInit:
 
     def test_emotion_order_class_attr(self) -> None:
         assert TwoTowerEmotionTransformer.EMOTION_ORDER == EMOTION_ORDER
-        assert len(TwoTowerEmotionTransformer.EMOTION_ORDER) == 7
+        assert len(TwoTowerEmotionTransformer.EMOTION_ORDER) == 8
 
     def test_attention_order_class_attr(self) -> None:
         assert TwoTowerEmotionTransformer.ATTENTION_ORDER == ATTENTION_ORDER
@@ -194,15 +199,15 @@ class TestTwoTowerInit:
 class TestForwardBothModalities:
     def test_output_type(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert isinstance(out, TwoTowerOutput)
+        assert isinstance(out, NeuralModelOutput)
 
     def test_emotion_logits_shape(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert out.emotion_logits.shape == (BATCH, 7)
+        assert out.emotion_logits.shape == (BATCH, 8)
 
     def test_emotion_probs_shape(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert out.emotion_probs.shape == (BATCH, 7)
+        assert out.emotion_probs.shape == (BATCH, 8)
 
     def test_emotion_probs_sum_to_one(self, model: TwoTowerEmotionTransformer) -> None:
         with torch.no_grad():
@@ -217,17 +222,17 @@ class TestForwardBothModalities:
 
     def test_attention_metrics_shape(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert out.attention_metrics.shape == (BATCH, 3)
+        assert out.metrics.shape == (BATCH, 3)
 
     def test_attention_metrics_in_unit_range(self, model: TwoTowerEmotionTransformer) -> None:
         with torch.no_grad():
             out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert (out.attention_metrics >= 0).all()
-        assert (out.attention_metrics <= 1).all()
+        assert (out.metrics >= 0).all()
+        assert (out.metrics <= 1).all()
 
     def test_fused_cls_shape(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
-        assert out.fused_cls.shape == (BATCH, D_MODEL)
+        assert out.latent_embedding.shape == (BATCH, D_MODEL)
 
     def test_missing_flags_both_present(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
@@ -239,8 +244,8 @@ class TestForwardVideoOnly:
     def test_video_only_forward(self, model: TwoTowerEmotionTransformer) -> None:
         with torch.no_grad():
             out = model(video_frames=make_video(), audio_spectrograms=None)
-        assert out.emotion_logits.shape == (BATCH, 7)
-        assert out.attention_metrics.shape == (BATCH, 3)
+        assert out.emotion_logits.shape == (BATCH, 8)
+        assert out.metrics.shape == (BATCH, 3)
 
     def test_audio_missing_flag(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=make_video(), audio_spectrograms=None)
@@ -256,16 +261,16 @@ class TestForwardVideoOnly:
     def test_attention_in_range_video_only(self, model: TwoTowerEmotionTransformer) -> None:
         with torch.no_grad():
             out = model(video_frames=make_video(), audio_spectrograms=None)
-        assert (out.attention_metrics >= 0).all()
-        assert (out.attention_metrics <= 1).all()
+        assert (out.metrics >= 0).all()
+        assert (out.metrics <= 1).all()
 
 
 class TestForwardAudioOnly:
     def test_audio_only_forward(self, model: TwoTowerEmotionTransformer) -> None:
         with torch.no_grad():
             out = model(video_frames=None, audio_spectrograms=make_audio())
-        assert out.emotion_logits.shape == (BATCH, 7)
-        assert out.attention_metrics.shape == (BATCH, 3)
+        assert out.emotion_logits.shape == (BATCH, 8)
+        assert out.metrics.shape == (BATCH, 3)
 
     def test_video_missing_flag(self, model: TwoTowerEmotionTransformer) -> None:
         out = model(video_frames=None, audio_spectrograms=make_audio())
@@ -295,8 +300,8 @@ class TestBatchSizeInvariance:
                 video_frames=make_video(batch=batch),
                 audio_spectrograms=make_audio(batch=batch),
             )
-        assert out.emotion_logits.shape == (batch, 7)
-        assert out.attention_metrics.shape == (batch, 3)
+        assert out.emotion_logits.shape == (batch, 8)
+        assert out.metrics.shape == (batch, 3)
 
 
 class TestDifferentModalityOutputsDistinct:
@@ -310,7 +315,7 @@ class TestDifferentModalityOutputsDistinct:
             out_both = model(video_frames=v, audio_spectrograms=a)
             out_v = model(video_frames=v, audio_spectrograms=None)
         # The fused representations should differ because one had real audio.
-        assert not torch.allclose(out_both.fused_cls, out_v.fused_cls)
+        assert not torch.allclose(out_both.latent_embedding, out_v.latent_embedding)
 
     def test_video_only_vs_audio_only(self, model: TwoTowerEmotionTransformer) -> None:
         v = make_video()
@@ -362,11 +367,14 @@ class TestParameterGroups:
         trainable = [p for p in model.parameters() if p.requires_grad]
         assert group_param_count <= len(trainable)  # groups may exclude frozen
 
-    def test_lr_scale_keys(self, model: TwoTowerEmotionTransformer) -> None:
-        groups = model.get_trainable_parameter_groups(backbone_lr_scale=0.05)
+    def test_lr_keys(self, model: TwoTowerEmotionTransformer) -> None:
+        """Parameter groups use differentiated 'lr' keys, not lr_scale."""
+        groups = model.get_trainable_parameter_groups(backbone_lr=1e-5, head_lr=1e-4)
         for g in groups:
-            assert "lr_scale" in g
-            assert g["lr_scale"] in {1.0, 0.05}
+            assert "lr" in g
+        lrs = {g["lr"] for g in groups}
+        assert 1e-5 in lrs
+        assert 1e-4 in lrs
 
 
 class TestCountParameters:
@@ -385,10 +393,21 @@ class TestOutputDataclass:
         out = model(video_frames=make_video(), audio_spectrograms=make_audio())
         assert hasattr(out, "emotion_logits")
         assert hasattr(out, "emotion_probs")
-        assert hasattr(out, "attention_metrics")
-        assert hasattr(out, "fused_cls")
+        assert hasattr(out, "metrics")        # previously "attention_metrics"
+        assert hasattr(out, "latent_embedding")  # previously "fused_cls"
         assert hasattr(out, "video_missing")
         assert hasattr(out, "audio_missing")
+
+    def test_legacy_output_fields(self, model: TwoTowerEmotionTransformer) -> None:
+        """TwoTowerOutput (return_legacy_output=True) still exposes old field names."""
+        out = model(
+            video_frames=make_video(),
+            audio_spectrograms=make_audio(),
+            return_legacy_output=True,
+        )
+        assert isinstance(out, TwoTowerOutput)
+        assert hasattr(out, "attention_metrics")
+        assert hasattr(out, "fused_cls")
 
     def test_logits_differ_from_probs(self, model: TwoTowerEmotionTransformer) -> None:
         """emotion_logits are raw; emotion_probs are softmax-normalised."""
@@ -401,15 +420,18 @@ class TestOutputDataclass:
 
 class TestLabelConstants:
     def test_emotion_order_length(self) -> None:
-        assert len(EMOTION_ORDER) == 7
+        assert len(EMOTION_ORDER) == 8
 
     def test_emotion_labels(self) -> None:
-        expected = {"angry", "disgusted", "fearful", "happy", "neutral", "sad", "surprised"}
+        expected = {
+            "angry", "disgusted", "fearful", "happy",
+            "neutral", "sad", "surprised", "unclear",
+        }
         assert set(EMOTION_ORDER) == expected
 
     def test_attention_order_length(self) -> None:
         assert len(ATTENTION_ORDER) == 3
 
     def test_attention_labels(self) -> None:
-        expected = {"stress", "engagement", "nervousness"}
+        expected = {"stress", "engagement", "arousal"}
         assert set(ATTENTION_ORDER) == expected

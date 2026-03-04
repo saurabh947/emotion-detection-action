@@ -92,4 +92,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # Suppress the expected GRU warning during batch-size > 1 unit tests.
+    "ignore:.*use_temporal=True is ignored for batch_size.*:UserWarning",
+    # Suppress the multi-worker InferenceWorker advisory during tests.
+    "ignore:.*InferenceWorker.*num_workers.*:UserWarning",
+]
 

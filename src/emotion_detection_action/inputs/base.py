@@ -72,10 +72,17 @@ class BaseInput(ABC, Generic[FrameT]):
                 break
             yield frame
 
-    async def __aiter__(self) -> AsyncIterator[FrameT]:
-        """Async iterate over frames."""
+    async def __aiter__(self) -> AsyncIterator[FrameT]:  # type: ignore[override]
+        """Async iterate over frames.
+
+        Note: calls the synchronous ``read()`` on each iteration.  For true
+        async I/O (e.g. network streams), override this method in a subclass
+        and use ``await`` appropriately.
+        """
+        import asyncio
+
         while True:
-            frame = self.read()
+            frame = await asyncio.get_event_loop().run_in_executor(None, self.read)
             if frame is None:
                 break
             yield frame

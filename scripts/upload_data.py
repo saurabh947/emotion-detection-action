@@ -16,6 +16,7 @@ Example:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -31,13 +32,32 @@ def human_size(n: int) -> str:
     return f"{n:.1f} TB"
 
 
+_SAFE_PATTERN = re.compile(r"^[A-Za-z0-9._/~-]+$")
+
+
+def _assert_safe_path(value: str, name: str) -> None:
+    """Reject paths containing shell metacharacters to prevent injection."""
+    if not _SAFE_PATTERN.match(value):
+        print(
+            f"  ERROR: {name} contains unsafe characters: {value!r}\n"
+            "  Only alphanumeric, '.', '_', '/', '~', and '-' are allowed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def stream_upload(node_name: str, local_data_dir: str, remote_combined_dir: str) -> None:
+    _assert_safe_path(node_name, "node_name")
+    _assert_safe_path(remote_combined_dir, "remote_combined_dir")
+
     if not os.path.isdir(local_data_dir):
         print(f"  ERROR: Local data directory not found: {local_data_dir}", file=sys.stderr)
         sys.exit(1)
 
     # ── Step 1: create tar.gz locally ───────────────────────────────────────
-    tmp_tar = tempfile.mktemp(suffix=".tar.gz", prefix="eda_upload_")
+    # Use mkstemp to avoid the TOCTOU race condition of the deprecated mktemp().
+    _fd, tmp_tar = tempfile.mkstemp(suffix=".tar.gz", prefix="eda_upload_")
+    os.close(_fd)  # Close the file descriptor; tarfile.open will reopen it.
     data_dir = local_data_dir.rstrip("/")
     parent   = os.path.dirname(data_dir)
     basename = os.path.basename(data_dir)
@@ -55,7 +75,10 @@ def stream_upload(node_name: str, local_data_dir: str, remote_combined_dir: str)
     # We send a Python one-liner that reads exactly file_size raw bytes from
     # stdin (which is the SSH pipe), writes them to a temp file, then extracts.
     # After Python consumes its bytes, the shell reads our final `exit 0\n`.
-    remote_tmp = "/tmp/_eda_upload.tar.gz"
+    #
+    # Use a randomized remote temp path to avoid symlink-attack races on /tmp.
+    import secrets
+    remote_tmp = f"/tmp/_eda_upload_{secrets.token_hex(8)}.tar.gz"
     receiver = (
         f"python3 -c \""
         f"import sys,os,subprocess;"
@@ -75,56 +98,63 @@ def stream_upload(node_name: str, local_data_dir: str, remote_combined_dir: str)
         stderr=subprocess.PIPE,
     )
 
-    # ── Step 3: send receiver command ───────────────────────────────────────
-    proc.stdin.write(receiver.encode())
+    try:
+        # ── Step 3: send receiver command ───────────────────────────────────
+        proc.stdin.write(receiver.encode())
 
-    # ── Step 4: stream raw binary tar.gz data ───────────────────────────────
-    chunk_size = 4 * 1024 * 1024  # 4 MB chunks
-    sent = 0
-    t_start = time.time()
-    print(f"  Uploading {human_size(file_size)} …")
+        # ── Step 4: stream raw binary tar.gz data ───────────────────────────
+        chunk_size = 4 * 1024 * 1024  # 4 MB chunks
+        sent = 0
+        t_start = time.time()
+        print(f"  Uploading {human_size(file_size)} …")
 
-    with open(tmp_tar, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            proc.stdin.write(chunk)
-            proc.stdin.flush()
-            sent += len(chunk)
-            pct   = sent / file_size * 100
-            speed = sent / max(time.time() - t_start, 0.1)
-            eta   = (file_size - sent) / max(speed, 1)
-            print(
-                f"\r  {human_size(sent)} / {human_size(file_size)}"
-                f"  ({pct:.0f}%)  {human_size(int(speed))}/s"
-                f"  ETA {eta:.0f}s   ",
-                end="",
-                flush=True,
-            )
+        with open(tmp_tar, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+                sent += len(chunk)
+                pct   = sent / file_size * 100
+                speed = sent / max(time.time() - t_start, 0.1)
+                eta   = (file_size - sent) / max(speed, 1)
+                print(
+                    f"\r  {human_size(sent)} / {human_size(file_size)}"
+                    f"  ({pct:.0f}%)  {human_size(int(speed))}/s"
+                    f"  ETA {eta:.0f}s   ",
+                    end="",
+                    flush=True,
+                )
 
-    print()  # newline after progress
+        print()  # newline after progress
 
-    # ── Step 5: close stdin so Python's read() returns, then exit ───────────
-    proc.stdin.write(b"\nexit 0\n")
-    proc.stdin.close()
+        # ── Step 5: close stdin so Python's read() returns, then exit ───────
+        proc.stdin.write(b"\nexit 0\n")
+        proc.stdin.close()
 
-    stdout, stderr = proc.communicate()
-    os.remove(tmp_tar)
+        stdout, stderr = proc.communicate()
 
-    # ── Step 6: check result ─────────────────────────────────────────────────
-    if proc.returncode != 0:
-        print(f"\n  ERROR: Upload failed (exit {proc.returncode})", file=sys.stderr)
-        if stderr:
-            print(stderr.decode(errors="replace"), file=sys.stderr)
-        sys.exit(proc.returncode)
+        # ── Step 6: check result ─────────────────────────────────────────────
+        if proc.returncode != 0:
+            print(f"\n  ERROR: Upload failed (exit {proc.returncode})", file=sys.stderr)
+            if stderr:
+                print(stderr.decode(errors="replace"), file=sys.stderr)
+            sys.exit(proc.returncode)
 
-    if b"UPLOAD_DONE" not in stdout:
-        print("\n  WARNING: Did not receive UPLOAD_DONE confirmation.", file=sys.stderr)
-        print("  stdout:", stdout.decode(errors="replace")[:500], file=sys.stderr)
-    else:
-        elapsed_total = time.time() - t_start
-        print(f"  Upload and extraction complete. ({elapsed_total:.0f}s total)")
+        if b"UPLOAD_DONE" not in stdout:
+            print("\n  WARNING: Did not receive UPLOAD_DONE confirmation.", file=sys.stderr)
+            print("  stdout:", stdout.decode(errors="replace")[:500], file=sys.stderr)
+        else:
+            elapsed_total = time.time() - t_start
+            print(f"  Upload and extraction complete. ({elapsed_total:.0f}s total)")
+
+    finally:
+        # Always remove the local temp archive, even on error or KeyboardInterrupt.
+        try:
+            os.remove(tmp_tar)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

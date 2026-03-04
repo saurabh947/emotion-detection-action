@@ -421,7 +421,7 @@ def main() -> None:
         cleanup_ddp(is_ddp)
         sys.exit(1)
 
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
     missing, _ = model.load_state_dict(ckpt["model_state"], strict=False)
     if missing and is_main:
         print(f"  WARNING: missing checkpoint keys: {missing[:5]} …")

@@ -219,7 +219,11 @@ class TestEmotionSmootherHysteresis:
         assert smoothed.emotions.happy == 0.8
 
     def test_hysteresis_allows_sustained_change(self):
-        """Test that hysteresis allows sustained emotion change."""
+        """Test that hysteresis allows a sustained emotion change.
+
+        After seeing the new emotion for at least hysteresis_frames consecutive
+        frames the smoother should commit to the new label.
+        """
         config = SmoothingConfig(
             strategy="hysteresis",
             hysteresis_threshold=0.15,
@@ -227,15 +231,15 @@ class TestEmotionSmootherHysteresis:
         )
         smoother = EmotionSmoother(config)
 
-        # Start with happy
+        # Establish happy as the current emotion
         smoother.smooth(create_emotion_result(happy=0.8, sad=0.2))
 
-        # Sustain sad for 3 frames
-        smoother.smooth(create_emotion_result(sad=0.8, happy=0.2))
-        smoother.smooth(create_emotion_result(sad=0.8, happy=0.2))
-        smoothed = smoother.smooth(create_emotion_result(sad=0.8, happy=0.2))
+        # Drive sad for hysteresis_frames + 1 frames to guarantee a committed switch
+        smoothed = None
+        for _ in range(config.hysteresis_frames + 1):
+            smoothed = smoother.smooth(create_emotion_result(sad=0.8, happy=0.2))
 
-        # Now should switch to sad
+        assert smoothed is not None
         assert smoothed.dominant_emotion == EmotionLabel.SAD
 
     def test_hysteresis_threshold(self):

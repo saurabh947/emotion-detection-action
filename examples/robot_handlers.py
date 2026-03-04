@@ -18,13 +18,13 @@ Usage:
     python robot_handlers.py --handler ros --topic /robot/action
 """
 
+from __future__ import annotations
+
 import argparse
 import time
 from pathlib import Path
 
-import cv2
-
-from emotion_detection_action import Config, EmotionDetector
+from emotion_detection_action import Config, EmotionDetector, NeuralEmotionResult
 from emotion_detection_action.actions import (
     LoggingActionHandler,
     HTTPActionHandler,
@@ -35,7 +35,7 @@ from emotion_detection_action.actions import (
 from emotion_detection_action.core.types import ActionCommand
 
 
-def create_handler(args):
+def create_handler(args: argparse.Namespace) -> object | None:
     """Create the appropriate action handler based on arguments."""
     if args.handler == "logging":
         return LoggingActionHandler(verbose=True)
@@ -77,7 +77,7 @@ def create_handler(args):
         return None
 
 
-def test_handler_standalone(handler) -> bool:
+def test_handler_standalone(handler: object) -> bool:
     """Test the handler with synthetic action commands."""
     print(f"\n{'='*50}")
     print(f"Testing {handler.name} handler standalone")
@@ -126,41 +126,51 @@ def test_handler_standalone(handler) -> bool:
     return True
 
 
-def demo_with_detector(handler, test_image: str | None = None):
+def demo_with_detector(handler: object, test_image: str | None = None) -> None:
     """Demo handler with actual emotion detection."""
     print(f"\n{'='*50}")
-    print(f"Demo with EmotionDetector using {handler.name} handler")
+    print(f"Demo with EmotionDetector using {getattr(handler, 'name', handler)} handler")
     print(f"{'='*50}\n")
 
     config = Config(
-        device="cpu",
+        two_tower_pretrained=False,  # stub mode — no download required for demo
+        two_tower_device="cpu",
         vla_enabled=False,
-        smoothing_strategy="ema",
-        smoothing_ema_alpha=0.3,
         verbose=False,
     )
 
-    with EmotionDetector(config, action_handler=handler) as detector:
-        if test_image and Path(test_image).exists():
-            print(f"Processing image: {test_image}")
-            frame = cv2.imread(test_image)
-            if frame is not None:
-                result = detector.process_frame(frame, timestamp=0.0)
-                if result:
-                    print(f"\nDetected: {result.emotion.dominant_emotion.value}")
-                    print(f"Confidence: {result.emotion.fusion_confidence:.2%}")
-                    print(f"Action: {result.action.action_type}")
-                else:
-                    print("No face detected in image")
-            else:
-                print(f"Failed to load image: {test_image}")
-        else:
-            print("No test image provided or not found.")
-            print("Provide --image path/to/image.jpg to test with real detection")
-            print("\nRunning with synthetic data instead...")
+    detector = EmotionDetector(config)
+    detector.initialize()
 
-            # Run handler standalone
-            test_handler_standalone(handler)
+    if test_image and Path(test_image).exists():
+        try:
+            import cv2
+        except ImportError:
+            raise RuntimeError("opencv-python required to load images: pip3 install opencv-python")
+
+        print(f"Processing image: {test_image}")
+        frame = cv2.imread(test_image)
+        if frame is not None:
+            # Accumulate enough frames for the rolling buffer, then run inference.
+            import numpy as np
+            for _ in range(20):
+                detector.process_frame(frame)
+            result: NeuralEmotionResult | None = detector.process_frame(frame)
+            if result is not None:
+                print(f"\nDetected  : {result.dominant_emotion}")
+                print(f"Confidence: {result.confidence:.2%}")
+                print(f"Metrics   : {result.metrics}")
+            else:
+                print("Detector returned no result yet (buffer still filling).")
+        else:
+            print(f"Failed to load image: {test_image}")
+    else:
+        print("No test image provided or not found.")
+        print("Provide --image path/to/image.jpg to test with real detection")
+        print("\nRunning with synthetic data instead...")
+        test_handler_standalone(handler)
+
+    detector.shutdown()
 
 
 def show_serial_ports():

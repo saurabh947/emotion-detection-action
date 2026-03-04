@@ -84,7 +84,7 @@ class VoiceDetection:
 
 @dataclass
 class EmotionScores:
-    """Emotion probability scores."""
+    """Emotion probability scores for all 8 classes."""
 
     happy: float = 0.0
     sad: float = 0.0
@@ -93,6 +93,7 @@ class EmotionScores:
     surprised: float = 0.0
     disgusted: float = 0.0
     neutral: float = 0.0
+    unclear: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         """Convert to dictionary."""
@@ -104,6 +105,7 @@ class EmotionScores:
             "surprised": self.surprised,
             "disgusted": self.disgusted,
             "neutral": self.neutral,
+            "unclear": self.unclear,
         }
 
     @property
@@ -124,6 +126,7 @@ class EmotionScores:
             surprised=scores.get("surprised", 0.0),
             disgusted=scores.get("disgusted", 0.0),
             neutral=scores.get("neutral", 0.0),
+            unclear=scores.get("unclear", 0.0),
         )
 
 

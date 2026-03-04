@@ -131,6 +131,11 @@ class BaseActionHandler(ABC):
                 parameters={},
                 confidence=1.0,
             ),
+            "unclear": ActionCommand(
+                action_type="idle",
+                parameters={"reason": "no_clear_subject"},
+                confidence=0.5,
+            ),
         }
 
         return default_actions.get(

@@ -151,8 +151,20 @@ class EmotionDetector:
         )
 
         if cfg.two_tower_model_path:
+            import pathlib
+            ckpt_path = pathlib.Path(cfg.two_tower_model_path).resolve()
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"two_tower_model_path does not exist or is not a file: {ckpt_path}"
+                )
+            if ckpt_path.suffix not in (".pt", ".pth"):
+                raise ValueError(
+                    f"two_tower_model_path must be a .pt or .pth file, got: {ckpt_path.name}"
+                )
             state = torch.load(
-                cfg.two_tower_model_path, map_location=cfg.two_tower_device
+                str(ckpt_path),
+                map_location=cfg.two_tower_device,
+                weights_only=True,
             )
             self._model.load_state_dict(state)
             if cfg.verbose:
@@ -282,22 +294,31 @@ class EmotionDetector:
 
         ts = timestamp if timestamp is not None else time.time()
 
-        # Convert BGR → RGB if the frame looks like a typical OpenCV frame.
+        # Convert BGR → RGB. This method expects BGR frames (standard OpenCV
+        # output).  If your source already delivers RGB frames, call process()
+        # directly to avoid a double conversion.
         rgb = frame[..., ::-1].copy() if frame.ndim == 3 and frame.shape[2] == 3 else frame
         self._frame_buffer.append(rgb)
 
         if audio is not None:
             self._audio_buffer.append(audio.astype(np.float32))
 
-        if not self._frame_buffer:
-            return None
-
         frames_arr = np.stack(list(self._frame_buffer), axis=0)  # (T, H, W, 3)
-        audio_arr = (
-            np.concatenate(self._audio_buffer[-self.config.sample_rate * 3 :], axis=0)
-            if self._audio_buffer
-            else None
-        )
+
+        # Concatenate all buffered audio then trim to the last 3 seconds of
+        # *samples* (not chunks).  Also prune old chunks from the buffer so
+        # memory stays bounded.
+        if self._audio_buffer:
+            full_audio = np.concatenate(list(self._audio_buffer), axis=0)
+            max_samples = self.config.sample_rate * 3
+            audio_arr: np.ndarray | None = full_audio[-max_samples:]
+            # Keep only chunks that contribute to the retained window.
+            if len(full_audio) > max_samples:
+                self._audio_buffer.clear()
+                self._audio_buffer.append(audio_arr)
+        else:
+            audio_arr = None
+
         return self.process(frames_arr, audio_arr, timestamp=ts)
 
     # ------------------------------------------------------------------ #
@@ -420,10 +441,10 @@ class EmotionDetector:
 
     @staticmethod
     def _build_result(
-        out: "NeuralFusionModel.__class__.__mro__[0]",
+        out: "NeuralModelOutput",
         timestamp: float,
     ) -> NeuralEmotionResult:
-        from emotion_detection_action.models.fusion import NeuralFusionModel
+        from emotion_detection_action.models.fusion import NeuralFusionModel, NeuralModelOutput  # noqa: F401
 
         probs = out.emotion_probs[0].cpu().tolist()
         emotion_scores = dict(zip(NeuralFusionModel.EMOTION_ORDER, probs))

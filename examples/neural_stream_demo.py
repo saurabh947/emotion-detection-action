@@ -39,6 +39,9 @@ Usage
     # Webcam + microphone with real pretrained weights
     python examples/neural_stream_demo.py --webcam --pretrained
 
+    # Webcam with a fine-tuned checkpoint (e.g. after training)
+    python examples/neural_stream_demo.py --webcam --pretrained --model-path outputs/phase2_best.pt
+
     # Webcam, GPU, 2 inference workers, INT8 quantized
     python examples/neural_stream_demo.py --webcam --device cuda --workers 2 --quantize
 
@@ -66,28 +69,24 @@ from emotion_detection_action import (
     InferenceWorker,
     NeuralEmotionResult,
 )
-from emotion_detection_action.actions.base import BaseActionHandler
 
 # ---------------------------------------------------------------------------
-# Custom action handler — subclass for your robot platform
+# Custom result handler — replace with your robot platform calls
 # ---------------------------------------------------------------------------
 
 
-class ConsoleActionHandler(BaseActionHandler):
+class ConsoleResultHandler:
     """Example handler: logs notable emotional events to stdout.
 
-    Replace the body of ``execute()`` with your robot SDK calls
-    (ROS publisher, serial command, WebSocket message, …).
+    This is NOT a subclass of BaseActionHandler because it receives
+    NeuralEmotionResult directly (richer than ActionCommand).
+
+    To integrate with a real robot, replace the pass statements with
+    your SDK calls (ROS publisher, serial command, WebSocket message, …).
     """
 
-    def connect(self) -> None:
-        pass
-
-    def disconnect(self) -> None:
-        pass
-
-    def execute(self, result: NeuralEmotionResult) -> None:  # type: ignore[override]
-        """Dispatch robot action based on dominant emotion.
+    def on_result(self, result: NeuralEmotionResult) -> None:
+        """Called once per inference result.
 
         Always check the ``"unclear"`` label before acting — the model
         returns it when no person is detected, the signal is too noisy, or
@@ -360,6 +359,7 @@ def run_webcam(
     video_model: str = "videomae",
     num_workers: int = 1,
     max_queue_size: int = 4,
+    model_path: str | None = None,
     verbose: bool = False,
 ) -> None:
     """Run live webcam + microphone detection with the background worker.
@@ -379,6 +379,8 @@ def run_webcam(
     print(f"  Backbone : {video_model.upper()}  device={device}")
     print(f"  Workers  : {num_workers}   queue={max_queue_size}")
     print(f"  Weights  : {'pretrained' if pretrained else 'stub (no download)'}")
+    if model_path:
+        print(f"  Checkpoint: {model_path}")
     print(f"  Quantize : {'INT8 dynamic' if quantize else 'off'}")
     print("=" * 65)
     print("  Press Q (in the OpenCV window) or Ctrl-C to quit.\n")
@@ -387,6 +389,7 @@ def run_webcam(
         two_tower_pretrained=pretrained,
         two_tower_video_model=video_model,   # type: ignore[arg-type]
         two_tower_device=device,
+        two_tower_model_path=model_path,
         vla_enabled=False,
         verbose=verbose,
     )
@@ -477,6 +480,7 @@ def run_simulation(
     video_model: str = "videomae",
     num_workers: int = 1,
     max_queue_size: int = 4,
+    model_path: str | None = None,
     verbose: bool = False,
 ) -> None:
     """Simulate a camera stream with synthetic frames and measure throughput."""
@@ -488,6 +492,8 @@ def run_simulation(
     print(f"  Backbone : {video_model.upper()}  device={device}")
     print(f"  Workers  : {num_workers}   queue={max_queue_size}")
     print(f"  Weights  : {'pretrained' if pretrained else 'stub (no download)'}")
+    if model_path:
+        print(f"  Checkpoint: {model_path}")
     print(f"  Quantize : {'INT8 dynamic' if quantize else 'off'}")
     print(f"  Simulate : {fps}fps × {duration_s}s = {total_frames} frames")
     print("=" * 65)
@@ -496,6 +502,7 @@ def run_simulation(
         two_tower_pretrained=pretrained,
         two_tower_video_model=video_model,   # type: ignore[arg-type]
         two_tower_device=device,
+        two_tower_model_path=model_path,
         vla_enabled=False,
         verbose=verbose,
     )
@@ -616,6 +623,9 @@ def main() -> None:
                         help="Inference worker threads (>1 for GPU parallelism)")
     parser.add_argument("--queue-size", type=int, default=4,
                         help="Max frames queued before oldest is dropped")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Path to a fine-tuned checkpoint (e.g. outputs/phase2_best.pt). "
+                             "When omitted the model runs with pretrained backbone weights only.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -630,6 +640,7 @@ def main() -> None:
             video_model=args.video_model,
             num_workers=args.workers,
             max_queue_size=args.queue_size,
+            model_path=args.model_path,
             verbose=args.verbose,
         )
     else:
@@ -642,6 +653,7 @@ def main() -> None:
             video_model=args.video_model,
             num_workers=args.workers,
             max_queue_size=args.queue_size,
+            model_path=args.model_path,
             verbose=args.verbose,
         )
 

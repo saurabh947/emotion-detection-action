@@ -130,7 +130,7 @@ class ROSActionHandler(BaseActionHandler):
                 queue_size=self.queue_size,
             )
 
-            if self.publish_emotion and self.emotion_topic:
+            if self._publish_emotion_enabled and self.emotion_topic:
                 self._emotion_pub = rospy.Publisher(
                     self.emotion_topic,
                     String,
@@ -161,7 +161,7 @@ class ROSActionHandler(BaseActionHandler):
                 self.queue_size,
             )
 
-            if self.publish_emotion and self.emotion_topic:
+            if self._publish_emotion_enabled and self.emotion_topic:
                 self._emotion_pub = self._node.create_publisher(
                     String2,
                     self.emotion_topic,

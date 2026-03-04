@@ -1,7 +1,14 @@
 """Video input handler for real-time camera streams."""
 
-import cv2
+from __future__ import annotations
+
 import numpy as np
+
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
 
 from emotion_detection_action.inputs.base import BaseInput, VideoFrame
 
@@ -23,9 +30,17 @@ class VideoInput(BaseInput[VideoFrame]):
 
         Args:
             frame_skip: Process every nth frame (1 = all frames).
+
+        Raises:
+            ImportError: If ``opencv-python`` is not installed.
         """
+        if not _CV2_AVAILABLE:
+            raise ImportError(
+                "opencv-python is required for VideoInput. "
+                "Install it with: pip install opencv-python"
+            )
         super().__init__()
-        self._cap: cv2.VideoCapture | None = None
+        self._cap: "cv2.VideoCapture | None" = None
         self._frame_number = 0
         self._frame_skip = max(1, frame_skip)
         self._fps: float = 30.0
