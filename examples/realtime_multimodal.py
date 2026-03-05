@@ -283,12 +283,16 @@ def run(
                 frame_count += 1
                 if frame_count % 60 == 0 and last_result is not None:
                     r = last_result
+                    s = worker.stats
                     print(
                         f"[{frame_count:5d}] {r.dominant_emotion:<10} "
                         f"({r.confidence:.0%}) | "
                         f"stress={r.metrics.get('stress', 0):.2f}  "
                         f"engage={r.metrics.get('engagement', 0):.2f}  "
-                        f"arousal={r.metrics.get('arousal', 0):.2f}"
+                        f"arousal={r.metrics.get('arousal', 0):.2f} | "
+                        f"p50={s.inference_latency_ms_p50:.0f}ms  "
+                        f"fps={s.effective_fps:.1f}  "
+                        f"drop={s.drop_rate:.0%}"
                     )
 
     except KeyboardInterrupt:
@@ -296,7 +300,17 @@ def run(
     finally:
         cap.release()
         display.stop()
-        print("Done.")
+        s = worker.stats
+        print("\n" + "-" * 55)
+        print(f"  Frames submitted : {s.frames_submitted}")
+        print(f"  Frames processed : {s.frames_processed}")
+        print(f"  Frames dropped   : {s.frames_dropped}  ({s.drop_rate:.1%})")
+        print(f"  Results produced : {s.results_produced}")
+        print(f"  Inference p50    : {s.inference_latency_ms_p50:.1f} ms")
+        print(f"  Inference p95    : {s.inference_latency_ms_p95:.1f} ms")
+        print(f"  Effective fps    : {s.effective_fps:.1f}")
+        status = "✓ keeping up" if s.is_keeping_up else "⚠ dropping frames — consider GPU or reducing resolution"
+        print(f"  Status           : {status}")
 
 
 def main() -> None:

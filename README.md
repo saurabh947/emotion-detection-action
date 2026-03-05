@@ -12,11 +12,11 @@ for robotics, built on a Two-Tower Multimodal Transformer.
 │                     NeuralFusionModel  (models/fusion.py)                    │
 │                                                                              │
 │  ┌─────────────────┐     ┌────────────────────────────────────┐              │
-│  │  VideoBackbone  │     │   Bidirectional CrossAttentionBlock │ × N layers  │
-│  │  (VideoMAE ✓   │     │                                    │              │
-│  │   or ViViT)    │──┐  │   video tokens ↔ audio tokens      │              │
-│  └─────────────────┘  │  │   Q=video  K/V=audio (V→A)        │              │
-│                        ├─►│   Q=audio  K/V=video (A→V)        │              │
+│  │  VideoBackbone  │     │  Bidirectional CrossAttentionBlock │ × N layers   │
+│  │  (VideoMAE ✓    │     │                                    │              │
+│  │   or ViViT)     │──┐  │   video tokens ↔ audio tokens      │              │
+│  └─────────────────┘  │  │   Q=video  K/V=audio (V→A)         │              │
+│                       ├─►│   Q=audio  K/V=video (A→V)         │              │
 │  ┌─────────────────┐  │  └────────────────┬───────────────────┘              │
 │  │  AudioBackbone  │──┘                   │ mean-pool                        │
 │  │  (AST)          │              ┌───────▼───────┐                          │

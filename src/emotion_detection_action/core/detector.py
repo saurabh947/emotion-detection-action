@@ -161,14 +161,38 @@ class EmotionDetector:
                 raise ValueError(
                     f"two_tower_model_path must be a .pt or .pth file, got: {ckpt_path.name}"
                 )
-            state = torch.load(
+            payload = torch.load(
                 str(ckpt_path),
                 map_location=cfg.two_tower_device,
                 weights_only=True,
             )
-            self._model.load_state_dict(state)
+            # Checkpoints saved by training/common.py are dicts with a
+            # "model_state" key.  Plain state dicts are also accepted.
+            state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
+            # Remap keys from older checkpoint naming conventions.
+            _RENAMES = {
+                "absent_video_token": "absent_video",
+                "absent_audio_token": "absent_audio",
+            }
+            state = {_RENAMES.get(k, k): v for k, v in state.items()}
+            missing, unexpected = self._model.load_state_dict(state, strict=False)
+            # Missing absent_* tokens are re-initialised from scratch — harmless.
+            # Any other missing keys indicate a genuine architecture mismatch.
+            real_missing = [k for k in missing if not k.startswith(("absent_video", "absent_audio"))]
+            if real_missing:
+                import warnings
+                warnings.warn(
+                    f"Checkpoint {ckpt_path.name} is missing {len(real_missing)} key(s) "
+                    f"that will use random initialisation: {real_missing[:5]}"
+                    + (" (…)" if len(real_missing) > 5 else ""),
+                    stacklevel=2,
+                )
             if cfg.verbose:
                 print(f"Loaded checkpoint: {cfg.two_tower_model_path}")
+                if missing:
+                    print(f"  Keys missing in checkpoint (re-initialised): {missing}")
+                if unexpected:
+                    print(f"  Unexpected keys in checkpoint (ignored): {unexpected}")
 
         self._model.to(cfg.two_tower_device)
         self._model.eval()
