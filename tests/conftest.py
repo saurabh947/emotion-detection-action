@@ -3,90 +3,87 @@
 import numpy as np
 import pytest
 
-from emotion_detection_action.core.types import (
-    BoundingBox,
-    EmotionScores,
-    FaceDetection,
-    VoiceDetection,
-)
+from emotion_detection_action.core.types import NeuralEmotionResult
+
+_EMOTION_KEYS = [
+    "angry", "disgusted", "fearful", "happy",
+    "neutral", "sad", "surprised", "unclear",
+]
 
 
 @pytest.fixture
 def sample_frame():
-    """Create a sample video frame."""
+    """Create a sample video frame (H, W, 3) uint8."""
     return np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
 
 
 @pytest.fixture
-def sample_face_image():
-    """Create a sample cropped face image."""
-    return np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+def sample_clip():
+    """Create a sample 16-frame video clip (T, H, W, 3) uint8."""
+    return np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
 
 
 @pytest.fixture
 def sample_audio():
-    """Create sample audio data (1 second at 16kHz)."""
+    """Create sample audio data (1 second at 16 kHz)."""
     return np.random.randn(16000).astype(np.float32) * 0.1
 
 
 @pytest.fixture
-def sample_bbox():
-    """Create a sample bounding box."""
-    return BoundingBox(x=100, y=100, width=200, height=200)
-
-
-@pytest.fixture
-def sample_face_detection(sample_bbox, sample_face_image):
-    """Create a sample face detection."""
-    return FaceDetection(
-        bbox=sample_bbox,
-        confidence=0.95,
-        face_image=sample_face_image,
-    )
-
-
-@pytest.fixture
-def sample_voice_detection(sample_audio):
-    """Create a sample voice detection."""
-    return VoiceDetection(
-        is_speech=True,
+def happy_result() -> NeuralEmotionResult:
+    """NeuralEmotionResult with dominant emotion 'happy'."""
+    scores = {k: 0.02 for k in _EMOTION_KEYS}
+    scores["happy"] = 0.9
+    return NeuralEmotionResult(
+        dominant_emotion="happy",
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.1, "engagement": 0.8, "arousal": 0.5},
         confidence=0.9,
-        start_time=0.0,
-        end_time=1.0,
-        audio_segment=sample_audio,
+        timestamp=0.0,
     )
 
 
 @pytest.fixture
-def sample_emotion_scores():
-    """Create sample emotion scores."""
-    return EmotionScores(
-        happy=0.6,
-        neutral=0.3,
-        sad=0.1,
+def sad_result() -> NeuralEmotionResult:
+    """NeuralEmotionResult with dominant emotion 'sad'."""
+    scores = {k: 0.02 for k in _EMOTION_KEYS}
+    scores["sad"] = 0.85
+    return NeuralEmotionResult(
+        dominant_emotion="sad",
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.4, "engagement": 0.3, "arousal": 0.2},
+        confidence=0.85,
+        timestamp=0.0,
     )
 
 
 @pytest.fixture
-def happy_emotion_scores():
-    """Create emotion scores for happy."""
-    return EmotionScores(happy=0.9, neutral=0.1)
+def angry_result() -> NeuralEmotionResult:
+    """NeuralEmotionResult with dominant emotion 'angry'."""
+    scores = {k: 0.02 for k in _EMOTION_KEYS}
+    scores["angry"] = 0.88
+    return NeuralEmotionResult(
+        dominant_emotion="angry",
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.8, "engagement": 0.5, "arousal": 0.9},
+        confidence=0.88,
+        timestamp=0.0,
+    )
 
 
 @pytest.fixture
-def sad_emotion_scores():
-    """Create emotion scores for sad."""
-    return EmotionScores(sad=0.8, neutral=0.2)
-
-
-@pytest.fixture
-def angry_emotion_scores():
-    """Create emotion scores for angry."""
-    return EmotionScores(angry=0.85, neutral=0.15)
-
-
-@pytest.fixture
-def neutral_emotion_scores():
-    """Create emotion scores for neutral."""
-    return EmotionScores(neutral=0.9, happy=0.1)
-
+def neutral_result() -> NeuralEmotionResult:
+    """NeuralEmotionResult with dominant emotion 'neutral'."""
+    scores = {k: 0.02 for k in _EMOTION_KEYS}
+    scores["neutral"] = 0.9
+    return NeuralEmotionResult(
+        dominant_emotion="neutral",
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.1, "engagement": 0.5, "arousal": 0.3},
+        confidence=0.9,
+        timestamp=0.0,
+    )

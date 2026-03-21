@@ -9,14 +9,12 @@ class TestModelConfig:
     """Tests for ModelConfig dataclass."""
 
     def test_creation(self):
-        """Test creating model config."""
         config = ModelConfig(model_id="test/model")
         assert config.model_id == "test/model"
         assert config.device == "cpu"
         assert config.dtype == "float32"
 
-    def test_with_options(self):
-        """Test model config with options."""
+    def test_with_quantisation_options(self):
         config = ModelConfig(
             model_id="test/model",
             device="cuda",
@@ -32,58 +30,46 @@ class TestConfig:
     """Tests for main Config class."""
 
     def test_default_values(self):
-        """Test default configuration values."""
         config = Config()
         assert config.vla_model == "openvla/openvla-7b"
-        assert config.device == "cpu"  # default is cpu; set two_tower_device for neural inference
-        assert config.face_detection_threshold == 0.5
-        assert config.face_detection_model == "mediapipe"
-
-    def test_invalid_face_detection_threshold(self):
-        """Test validation of face_detection_threshold."""
-        with pytest.raises(ValueError, match="face_detection_threshold must be between 0 and 1"):
-            Config(face_detection_threshold=1.1)
-
-    def test_get_face_detection_config(self):
-        """Test generating face detection model config."""
-        config = Config(
-            device="cuda",
-            dtype="float16",
-            face_detection_model="mediapipe",
-            face_detection_threshold=0.6,
-        )
-        model_config = config.get_face_detection_config()
-        assert model_config.model_id == "mediapipe"
-        assert model_config.device == "cuda"
-        assert model_config.extra_kwargs["threshold"] == 0.6
+        assert config.device == "cpu"
+        assert config.sample_rate == 16000
+        assert config.two_tower_pretrained is True
+        assert config.two_tower_device == "cpu"
+        assert config.two_tower_d_model == 512
 
     def test_get_vla_config(self):
-        """Test generating VLA model config."""
         config = Config(vla_model="custom/vla-model")
         vla_config = config.get_vla_config()
         assert vla_config.model_id == "custom/vla-model"
-        assert vla_config.load_in_8bit is True  # Default for VLA
+        assert vla_config.load_in_8bit is True
 
     def test_from_dict(self):
-        """Test creating config from dictionary."""
         d = {
             "device": "cpu",
-            "face_detection_threshold": 0.8,
-            "unknown_key": "ignored",  # Should be ignored
+            "sample_rate": 22050,
+            "unknown_key": "ignored",
         }
         config = Config.from_dict(d)
         assert config.device == "cpu"
-        assert config.face_detection_threshold == 0.8
+        assert config.sample_rate == 22050
 
     def test_to_dict(self):
-        """Test converting config to dictionary."""
         config = Config(device="cpu")
         d = config.to_dict()
         assert d["device"] == "cpu"
         assert "vla_model" in d
+        assert "two_tower_pretrained" in d
+
+    def test_invalid_sample_rate(self):
+        with pytest.raises(ValueError, match="sample_rate must be >= 1"):
+            Config(sample_rate=0)
+
+    def test_invalid_d_model_not_divisible(self):
+        with pytest.raises(ValueError, match="divisible by 8"):
+            Config(two_tower_d_model=513)
 
     def test_neural_pipeline_settings(self):
-        """Test neural pipeline (Two-Tower Transformer) settings."""
         config = Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
@@ -104,3 +90,7 @@ class TestConfig:
         """VideoMAE uses 16 frames by default."""
         config = Config(two_tower_video_model="videomae")
         assert config.two_tower_video_frames == 16
+
+    def test_vla_disabled(self):
+        config = Config(vla_enabled=False)
+        assert config.vla_enabled is False

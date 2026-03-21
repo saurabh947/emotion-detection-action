@@ -106,12 +106,9 @@ src/emotion_detection_action/
 │   └── vla/                ← OpenVLA integration (optional)
 ├── core/
 │   ├── detector.py         ← EmotionDetector (pure-neural, platform-agnostic)
+│   ├── inference_worker.py ← InferenceWorker · WorkerStats (background thread + queue)
 │   ├── config.py           ← Config dataclass
-│   └── types.py            ← NeuralEmotionResult (Pydantic) + legacy types
-├── emotion/
-│   ├── two_tower_transformer.py  ← backward-compat shim → NeuralFusionModel
-│   ├── facial.py                 ← ViT per-frame recogniser (custom pipelines)
-│   └── speech.py                 ← Wav2Vec2 recogniser (custom pipelines)
+│   └── types.py            ← NeuralEmotionResult (Pydantic) · ActionCommand · EmotionLabel
 ├── actions/
 │   └── base.py             ← BaseActionHandler (subclass for your robot)
 └── inputs/

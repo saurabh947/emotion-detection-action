@@ -32,14 +32,8 @@ from emotion_detection_action.core.detector import EmotionDetector
 from emotion_detection_action.core.inference_worker import InferenceWorker, WorkerStats
 from emotion_detection_action.core.types import (
     ActionCommand,
-    AttentionMetrics,
-    AttentionResult,
-    DetectionResult,
-    EmotionResult,
-    FaceDetection,
-    GazeDetection,
+    EmotionLabel,
     NeuralEmotionResult,
-    VoiceDetection,
 )
 from emotion_detection_action.models import (
     BackboneConfig,
@@ -57,17 +51,10 @@ __all__ = [
     "Config",
     # Primary output contract
     "NeuralEmotionResult",
+    "EmotionLabel",
+    "ActionCommand",
     # Model (for direct use / fine-tuning)
     "NeuralFusionModel",
     "NeuralModelOutput",
     "BackboneConfig",
-    # Legacy types (kept for backward compatibility)
-    "EmotionResult",
-    "DetectionResult",
-    "ActionCommand",
-    "FaceDetection",
-    "VoiceDetection",
-    "GazeDetection",
-    "AttentionResult",
-    "AttentionMetrics",
 ]

@@ -40,10 +40,10 @@ class TestModelRegistry:
         assert model_class is None
 
     def test_register_invalid_category(self):
-        """Test registering to invalid category raises error."""
+        """Registering to an unknown category raises ValueError."""
         registry = ModelRegistry()
         with pytest.raises(ValueError, match="Unknown category"):
-            registry.register("invalid_category", "model", DummyModel)
+            registry.register("face_detection", "model", DummyModel)
 
     def test_create_model(self):
         """Test creating a model instance."""
@@ -69,18 +69,15 @@ class TestModelRegistry:
         registry = ModelRegistry()
         registry.register("vla", "model_a", DummyModel)
         registry.register("vla", "model_b", DummyModel)
-        registry.register("face_detection", "model_c", DummyModel)
 
         # List all
         all_models = registry.list_models()
         assert "model_a" in all_models["vla"]
         assert "model_b" in all_models["vla"]
-        assert "model_c" in all_models["face_detection"]
 
         # List specific category
         vla_models = registry.list_models("vla")
         assert "model_a" in vla_models["vla"]
-        assert "face_detection" not in vla_models
 
     def test_register_decorator(self):
         """Test using register as decorator."""

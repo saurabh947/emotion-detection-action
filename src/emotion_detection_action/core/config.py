@@ -48,23 +48,13 @@ class Config:
     vla_enabled: bool = True
 
     # ------------------------------------------------------------------ #
-    # Device settings                                                      #
+    # Device / dtype settings (used by VLA sub-model via get_vla_config)  #
     # ------------------------------------------------------------------ #
-    # NOTE: `device` is used only by legacy/VLA sub-models (get_face_detection_config,
-    # get_vla_config). Neural inference always uses `two_tower_device` (default "cpu").
-    # Do not rely on `device` for the emotion recognition model.
-    device: str = "cpu"    # used by face detection and VLA sub-models
+    device: str = "cpu"
     dtype: str = "float32"
 
     # ------------------------------------------------------------------ #
-    # Face detection (MediaPipe)                                           #
-    # ------------------------------------------------------------------ #
-    face_detection_model: str = "mediapipe"
-    face_detection_threshold: float = 0.5
-    face_min_size: int = 20
-
-    # ------------------------------------------------------------------ #
-    # Voice activity detection                                             #
+    # Audio input                                                          #
     # ------------------------------------------------------------------ #
     sample_rate: int = 16000
 
@@ -116,49 +106,17 @@ class Config:
     two_tower_hop_length: int = 160
 
     # ------------------------------------------------------------------ #
-    # Attention analysis settings                                          #
-    # ------------------------------------------------------------------ #
-    # MediaPipe-based gaze tracking (used for gaze visualisation overlay).
-    # Attention *scores* (stress, engagement, arousal) come from the
-    # Two-Tower attention head — not from a deterministic algorithm.
-    attention_analysis_enabled: bool = True
-    mediapipe_delegate: Literal["cpu", "gpu"] = "cpu"
-
-    # ------------------------------------------------------------------ #
-    # Temporal smoothing settings                                          #
-    # ------------------------------------------------------------------ #
-    smoothing_strategy: Literal["none", "rolling", "ema", "hysteresis"] = "none"
-    smoothing_window: int = 5
-    smoothing_ema_alpha: float = 0.3
-    smoothing_hysteresis_threshold: float = 0.15
-    smoothing_hysteresis_frames: int = 3
-
-    # ------------------------------------------------------------------ #
     # Performance settings                                                 #
     # ------------------------------------------------------------------ #
-    max_faces: int = 5
-    frame_skip: int = 1
     cache_dir: str | None = None
     verbose: bool = False
 
     def __post_init__(self) -> None:
         """Validate configuration values and apply model-specific defaults."""
-        if not 0 <= self.face_detection_threshold <= 1:
-            raise ValueError("face_detection_threshold must be between 0 and 1")
-        if self.smoothing_window < 1:
-            raise ValueError("smoothing_window must be >= 1")
-        if not 0 < self.smoothing_ema_alpha <= 1:
-            raise ValueError("smoothing_ema_alpha must be in (0, 1]")
-        if not 0 <= self.smoothing_hysteresis_threshold <= 1:
-            raise ValueError("smoothing_hysteresis_threshold must be in [0, 1]")
-        if self.smoothing_hysteresis_frames < 1:
-            raise ValueError("smoothing_hysteresis_frames must be >= 1")
-        if self.two_tower_video_frames < 1:
-            raise ValueError("two_tower_video_frames must be >= 1")
-        if self.max_faces < 1:
-            raise ValueError("max_faces must be >= 1")
         if self.sample_rate < 1:
             raise ValueError("sample_rate must be >= 1")
+        if self.two_tower_video_frames < 1:
+            raise ValueError("two_tower_video_frames must be >= 1")
         if self.two_tower_d_model < 1:
             raise ValueError("two_tower_d_model must be >= 1")
         if self.two_tower_d_model % 8 != 0:
@@ -174,16 +132,6 @@ class Config:
         # Auto-set correct frame count for ViViT (needs 32 frames).
         if self.two_tower_video_model == "vivit" and self.two_tower_video_frames == 16:
             self.two_tower_video_frames = 32
-
-    def get_face_detection_config(self) -> ModelConfig:
-        """Get configuration for the face detection model."""
-        return ModelConfig(
-            model_id=self.face_detection_model,
-            device=self.device,
-            dtype=self.dtype,
-            cache_dir=self.cache_dir,
-            extra_kwargs={"threshold": self.face_detection_threshold},
-        )
 
     def get_vla_config(self) -> ModelConfig:
         """Get configuration for the VLA model."""

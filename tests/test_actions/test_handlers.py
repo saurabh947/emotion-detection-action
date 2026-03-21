@@ -12,9 +12,26 @@ from emotion_detection_action.actions.serial_handler import SerialActionHandler
 from emotion_detection_action.core.types import (
     ActionCommand,
     EmotionLabel,
-    EmotionResult,
-    EmotionScores,
+    NeuralEmotionResult,
 )
+
+_EMOTION_KEYS = [
+    "angry", "disgusted", "fearful", "happy",
+    "neutral", "sad", "surprised", "unclear",
+]
+
+
+def _result(dominant: str, confidence: float = 0.9) -> NeuralEmotionResult:
+    scores = {k: 0.02 for k in _EMOTION_KEYS}
+    scores[dominant] = confidence
+    return NeuralEmotionResult(
+        dominant_emotion=dominant,
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.1, "engagement": 0.5, "arousal": 0.3},
+        confidence=confidence,
+        timestamp=0.0,
+    )
 
 
 class TestBaseActionHandler:
@@ -23,42 +40,26 @@ class TestBaseActionHandler:
     def test_generate_default_action_happy(self):
         """Test default action for happy emotion."""
         handler = LoggingActionHandler(verbose=False)
-        scores = EmotionScores(happy=0.9)
-        emotion = EmotionResult(timestamp=0.0, emotions=scores, fusion_confidence=0.9)
-
-        action = handler._generate_default_action(emotion)
-
+        action = handler._generate_default_action(_result("happy"))
         assert action.action_type == "acknowledge"
         assert action.parameters.get("gesture") == "nod"
 
     def test_generate_default_action_sad(self):
         """Test default action for sad emotion."""
         handler = LoggingActionHandler(verbose=False)
-        scores = EmotionScores(sad=0.9)
-        emotion = EmotionResult(timestamp=0.0, emotions=scores, fusion_confidence=0.9)
-
-        action = handler._generate_default_action(emotion)
-
+        action = handler._generate_default_action(_result("sad"))
         assert action.action_type == "comfort"
 
     def test_generate_default_action_angry(self):
         """Test default action for angry emotion."""
         handler = LoggingActionHandler(verbose=False)
-        scores = EmotionScores(angry=0.9)
-        emotion = EmotionResult(timestamp=0.0, emotions=scores, fusion_confidence=0.9)
-
-        action = handler._generate_default_action(emotion)
-
+        action = handler._generate_default_action(_result("angry"))
         assert action.action_type == "de_escalate"
 
     def test_generate_default_action_neutral(self):
         """Test default action for neutral emotion."""
         handler = LoggingActionHandler(verbose=False)
-        scores = EmotionScores(neutral=0.9)
-        emotion = EmotionResult(timestamp=0.0, emotions=scores, fusion_confidence=0.9)
-
-        action = handler._generate_default_action(emotion)
-
+        action = handler._generate_default_action(_result("neutral"))
         assert action.action_type == "idle"
 
     def test_get_supported_actions(self):
@@ -214,14 +215,11 @@ class TestLoggingActionHandler:
         assert not handler.is_connected
 
     def test_execute_for_emotion(self):
-        """Test executing action based on emotion."""
+        """Test executing action based on NeuralEmotionResult."""
         handler = LoggingActionHandler(verbose=False)
         handler.connect()
 
-        scores = EmotionScores(happy=0.9)
-        emotion = EmotionResult(timestamp=0.0, emotions=scores, fusion_confidence=0.9)
-
-        result = handler.execute_for_emotion(emotion)
+        result = handler.execute_for_emotion(_result("happy"))
 
         assert result is True
         last = handler.get_last_action()

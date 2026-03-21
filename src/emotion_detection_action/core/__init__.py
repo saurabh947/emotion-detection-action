@@ -5,31 +5,16 @@ from emotion_detection_action.core.detector import EmotionDetector
 from emotion_detection_action.core.inference_worker import InferenceWorker, WorkerStats
 from emotion_detection_action.core.types import (
     ActionCommand,
-    AttentionMetrics,
-    AttentionResult,
-    DetectionResult,
-    EmotionResult,
-    FaceDetection,
-    GazeDetection,
+    EmotionLabel,
     NeuralEmotionResult,
-    VoiceDetection,
 )
 
 __all__ = [
-    # Primary API
     "EmotionDetector",
     "InferenceWorker",
     "WorkerStats",
     "Config",
     "NeuralEmotionResult",
-    # Legacy types (kept for backward compatibility)
-    "EmotionResult",
-    "DetectionResult",
     "ActionCommand",
-    "FaceDetection",
-    "VoiceDetection",
-    "GazeDetection",
-    "AttentionResult",
-    "AttentionMetrics",
+    "EmotionLabel",
 ]
-

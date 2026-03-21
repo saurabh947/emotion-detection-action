@@ -1,22 +1,13 @@
-"""Integration tests for the emotion detection pipeline."""
+"""Integration tests for the neural emotion detection pipeline."""
 
 import numpy as np
 import pytest
 
 from emotion_detection_action.actions.logging_handler import MockActionHandler
 from emotion_detection_action.core.config import Config
-from emotion_detection_action.core.types import (
-    ActionCommand,
-    BoundingBox,
-    DetectionResult,
-    EmotionResult,
-    EmotionScores,
-    FaceDetection,
-    FacialEmotionResult,
-    PipelineResult,
-)
+from emotion_detection_action.core.types import ActionCommand, NeuralEmotionResult
 
-# Check if PyTorch is available for fusion tests
+# Check if PyTorch is available for neural model tests
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -24,218 +15,75 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
-class TestPipelineIntegration:
-    """Integration tests for the full pipeline flow."""
+def _make_result(dominant: str = "happy", confidence: float = 0.9) -> NeuralEmotionResult:
+    """Build a minimal NeuralEmotionResult for testing."""
+    scores = {e: 0.0 for e in ["angry", "disgusted", "fearful", "happy", "neutral", "sad", "surprised", "unclear"]}
+    scores[dominant] = confidence
+    return NeuralEmotionResult(
+        dominant_emotion=dominant,
+        emotion_scores=scores,
+        latent_embedding=[0.0] * 512,
+        metrics={"stress": 0.1, "engagement": 0.8, "arousal": 0.5},
+        confidence=confidence,
+        timestamp=1.0,
+    )
 
-    def test_detection_to_emotion_flow(self):
-        """Test flow from detection to emotion result."""
-        # Simulate face detection
-        bbox = BoundingBox(x=100, y=100, width=200, height=200)
-        face = FaceDetection(
-            bbox=bbox,
-            confidence=0.95,
-            face_image=np.zeros((200, 200, 3), dtype=np.uint8),
-        )
 
-        # Create detection result
-        detection = DetectionResult(
-            timestamp=1.0,
-            faces=[face],
-            voice=None,
-            frame=np.zeros((480, 640, 3), dtype=np.uint8),
-        )
-
-        assert len(detection.faces) == 1
-        assert detection.faces[0].confidence == 0.95
+class TestActionHandlerIntegration:
+    """Integration tests for action handler + NeuralEmotionResult."""
 
     def test_emotion_to_action_flow(self):
-        """Test flow from emotion result to action."""
-        # Create emotion result
-        scores = EmotionScores(happy=0.8, neutral=0.2)
-        emotion = EmotionResult(
-            timestamp=1.0,
-            emotions=scores,
-            fusion_confidence=0.85,
-        )
-
-        # Use mock handler
+        """Happy emotion triggers acknowledge action."""
+        result = _make_result("happy", 0.9)
         handler = MockActionHandler()
         handler.connect()
-        handler.expect_action("acknowledge")  # Happy -> acknowledge
+        handler.expect_action("acknowledge")
 
-        # Execute for emotion
-        handler.execute_for_emotion(emotion)
+        handler.execute_for_emotion(result)
 
-        # Verify
         success, _ = handler.verify_expectations()
         assert success is True
 
-    def test_full_pipeline_result(self):
-        """Test creating a full pipeline result."""
-        # Detection
-        detection = DetectionResult(timestamp=1.0)
-
-        # Emotion
-        scores = EmotionScores(surprised=0.7, neutral=0.3)
-        emotion = EmotionResult(
-            timestamp=1.0,
-            emotions=scores,
-            fusion_confidence=0.8,
-        )
-
-        # Action
-        action = ActionCommand(
-            action_type="wait",
-            parameters={"duration": 2.0},
-            confidence=0.9,
-        )
-
-        # Full result
-        result = PipelineResult(
-            timestamp=1.0,
-            detection=detection,
-            emotion=emotion,
-            action=action,
-        )
-
-        # Verify serialization
-        d = result.to_dict()
-        assert d["timestamp"] == 1.0
-        assert d["dominant_emotion"] == "surprised"
-        assert d["action"]["type"] == "wait"
-
-    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_neural_pipeline_flow(self):
-        """Test neural pipeline (NeuralFusionModel) with stub backbones."""
-        import numpy as np
-        import torch
-        from emotion_detection_action import Config, EmotionDetector
-
-        config = Config(
-            two_tower_pretrained=False,
-            two_tower_device="cpu",
-            vla_enabled=False,
-        )
-        detector = EmotionDetector(config)
-        detector.initialize()
-
-        # Single-frame API
-        frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-        result = detector.process_frame(frame)
-        # process_frame accumulates frames; result may be None until buffer is full
-        # Drive it to full by submitting enough frames
-        for _ in range(20):
-            result = detector.process_frame(frame)
-
-        assert result is not None
-        assert result.dominant_emotion in [
-            "angry", "disgusted", "fearful", "happy",
-            "neutral", "sad", "surprised", "unclear",
+    def test_default_action_mapping(self):
+        """Each emotion class maps to the correct default action."""
+        cases = [
+            ("happy",     "acknowledge"),
+            ("sad",       "comfort"),
+            ("angry",     "de_escalate"),
+            ("fearful",   "reassure"),
+            ("surprised", "wait"),
+            ("disgusted", "retreat"),
+            ("neutral",   "idle"),
+            ("unclear",   "idle"),
         ]
-        assert 0.0 <= result.confidence <= 1.0
-        assert len(result.latent_embedding) == 512
-        assert set(result.metrics.keys()) == {"stress", "engagement", "arousal"}
-
-    def test_action_handler_integration(self):
-        """Test action handler receives correct actions."""
         handler = MockActionHandler()
         handler.connect()
 
-        # Simulate different emotion scenarios
-        emotions_and_expected = [
-            (EmotionScores(happy=0.9), "acknowledge"),
-            (EmotionScores(sad=0.9), "comfort"),
-            (EmotionScores(angry=0.9), "de_escalate"),
-            (EmotionScores(neutral=0.9), "idle"),
-        ]
-
-        for scores, expected_action in emotions_and_expected:
-            emotion = EmotionResult(
-                timestamp=0.0,
-                emotions=scores,
-                fusion_confidence=0.9,
-            )
-
+        for emotion, expected_action in cases:
+            result = _make_result(emotion, 0.9)
             handler.reset_expectations()
             handler.expect_action(expected_action)
-            handler.execute_for_emotion(emotion)
-
+            handler.execute_for_emotion(result)
             success, msg = handler.verify_expectations()
-            assert success, f"Failed for {scores}: {msg}"
-
-
-class TestPipelineEdgeCases:
-    """Test edge cases in the pipeline."""
-
-    def test_no_face_detected(self):
-        """Test handling when no face is detected."""
-        detection = DetectionResult(
-            timestamp=1.0,
-            faces=[],  # No faces
-            voice=None,
-        )
-
-        assert len(detection.faces) == 0
-
-    def test_multiple_faces_detected(self):
-        """Test handling multiple faces."""
-        faces = []
-        for i in range(3):
-            bbox = BoundingBox(x=i * 100, y=0, width=100, height=100)
-            faces.append(FaceDetection(bbox=bbox, confidence=0.9 - i * 0.1))
-
-        detection = DetectionResult(timestamp=1.0, faces=faces)
-
-        assert len(detection.faces) == 3
-        # First face has highest confidence
-        assert detection.faces[0].confidence == 0.9
-
-    def test_low_confidence_results(self):
-        """Test handling low confidence results."""
-        # Low confidence emotion
-        scores = EmotionScores(neutral=0.3, happy=0.3, sad=0.2, angry=0.2)
-        emotion = EmotionResult(
-            timestamp=1.0,
-            emotions=scores,
-            fusion_confidence=0.3,  # Low confidence
-        )
-
-        handler = MockActionHandler()
-        handler.connect()
-
-        # Should still execute action
-        result = handler.execute_for_emotion(emotion)
-        assert result is True
+            assert success, f"Failed for {emotion}: {msg}"
 
     def test_rapid_emotion_changes(self):
-        """Test handling rapid emotion changes."""
+        """Handler survives rapid consecutive emotion changes."""
         handler = MockActionHandler()
         handler.connect()
 
-        emotions = [
-            EmotionScores(happy=0.9),
-            EmotionScores(sad=0.9),
-            EmotionScores(angry=0.9),
-            EmotionScores(happy=0.9),
-        ]
-
-        for scores in emotions:
-            emotion = EmotionResult(
-                timestamp=0.0,
-                emotions=scores,
-                fusion_confidence=0.9,
-            )
-            handler.execute_for_emotion(emotion)
+        for emotion in ["happy", "sad", "angry", "happy"]:
+            handler.execute_for_emotion(_make_result(emotion))
 
         stats = handler.get_statistics()
         assert stats["total_actions"] == 4
 
 
 class TestConfigIntegration:
-    """Test configuration integration with the neural pipeline."""
+    """Configuration integration with the neural pipeline."""
 
-    def test_neural_pipeline_config_settings(self):
-        """Neural pipeline (Two-Tower Transformer) config fields are accessible."""
+    def test_neural_pipeline_config_fields(self):
+        """Two-Tower config fields are accessible."""
         config = Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
@@ -245,19 +93,20 @@ class TestConfigIntegration:
         assert config.two_tower_device == "cpu"
         assert config.two_tower_model_path == "outputs/phase2_best.pt"
 
-    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_neural_detector_produces_valid_output(self):
-        """NeuralFusionModel stub produces correctly-shaped NeuralEmotionResult."""
-        import numpy as np
-        from emotion_detection_action import Config, EmotionDetector
-        from emotion_detection_action.core.types import NeuralEmotionResult
 
-        config = Config(
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+class TestNeuralPipeline:
+    """End-to-end tests for the pure-neural detector."""
+
+    def test_process_clip_returns_valid_result(self):
+        """detector.process() returns a well-formed NeuralEmotionResult."""
+        from emotion_detection_action import Config, EmotionDetector
+
+        detector = EmotionDetector(Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
             vla_enabled=False,
-        )
-        detector = EmotionDetector(config)
+        ))
         detector.initialize()
 
         clip = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
@@ -269,5 +118,45 @@ class TestConfigIntegration:
             "angry", "disgusted", "fearful", "happy",
             "neutral", "sad", "surprised", "unclear",
         ]
+        assert 0.0 <= result.confidence <= 1.0
         assert len(result.latent_embedding) == 512
         assert set(result.metrics.keys()) == {"stress", "engagement", "arousal"}
+
+    def test_process_frame_accumulates_and_emits(self):
+        """process_frame() returns a result once the frame buffer is full."""
+        from emotion_detection_action import Config, EmotionDetector
+
+        detector = EmotionDetector(Config(
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            vla_enabled=False,
+        ))
+        detector.initialize()
+
+        frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+        result = None
+        for _ in range(20):
+            result = detector.process_frame(frame)
+
+        assert result is not None
+        assert isinstance(result, NeuralEmotionResult)
+
+    def test_result_action_integration(self):
+        """NeuralEmotionResult flows correctly into an action handler."""
+        from emotion_detection_action import Config, EmotionDetector
+
+        detector = EmotionDetector(Config(
+            two_tower_pretrained=False,
+            two_tower_device="cpu",
+            vla_enabled=False,
+        ))
+        detector.initialize()
+        handler = MockActionHandler()
+        handler.connect()
+
+        clip = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
+        result = detector.process(clip)
+
+        action = handler._generate_default_action(result)
+        assert isinstance(action, ActionCommand)
+        assert action.action_type in handler.get_supported_actions()

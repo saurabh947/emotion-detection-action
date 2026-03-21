@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from emotion_detection_action.core.types import ActionCommand, EmotionResult
+from emotion_detection_action.core.types import ActionCommand, NeuralEmotionResult
 
 
 class BaseActionHandler(ABC):
@@ -65,15 +65,15 @@ class BaseActionHandler(ABC):
 
     def execute_for_emotion(
         self,
-        emotion_result: EmotionResult,
+        emotion_result: NeuralEmotionResult,
         action: ActionCommand | None = None,
     ) -> bool:
-        """Execute an action based on emotion result.
+        """Execute an action based on a neural emotion result.
 
         If no action is provided, generates a default action based on emotion.
 
         Args:
-            emotion_result: The detected emotion.
+            emotion_result: The detected emotion (NeuralEmotionResult).
             action: Optional pre-generated action command.
 
         Returns:
@@ -84,16 +84,16 @@ class BaseActionHandler(ABC):
 
         return self.execute(action)
 
-    def _generate_default_action(self, emotion: EmotionResult) -> ActionCommand:
+    def _generate_default_action(self, emotion: NeuralEmotionResult) -> ActionCommand:
         """Generate a default action based on detected emotion.
 
         Args:
-            emotion: The detected emotion result.
+            emotion: The neural emotion result.
 
         Returns:
             Default action command for the emotion.
         """
-        emotion_label = emotion.dominant_emotion.value
+        emotion_label = emotion.dominant_emotion
 
         default_actions = {
             "happy": ActionCommand(

@@ -7,7 +7,7 @@ import json
 from typing import Any, Callable
 
 from emotion_detection_action.actions.base import BaseActionHandler
-from emotion_detection_action.core.types import ActionCommand, EmotionResult
+from emotion_detection_action.core.types import ActionCommand, NeuralEmotionResult
 
 # Try to import ROS libraries
 ROS1_AVAILABLE = False
@@ -228,11 +228,11 @@ class ROSActionHandler(BaseActionHandler):
             print(f"ROS publish failed: {e}")
             return False
 
-    def _publish_emotion_to_topic(self, emotion: EmotionResult) -> bool:
-        """Publish emotion result to ROS topic.
+    def _publish_emotion_to_topic(self, emotion: NeuralEmotionResult) -> bool:
+        """Publish neural emotion result to ROS topic.
 
         Args:
-            emotion: Emotion result to publish.
+            emotion: NeuralEmotionResult to publish.
 
         Returns:
             True if published successfully.
@@ -243,9 +243,10 @@ class ROSActionHandler(BaseActionHandler):
         try:
             message_data = {
                 "timestamp": emotion.timestamp,
-                "dominant_emotion": emotion.dominant_emotion.value,
-                "emotions": emotion.emotions.to_dict(),
-                "fusion_confidence": emotion.fusion_confidence,
+                "dominant_emotion": emotion.dominant_emotion,
+                "emotion_scores": emotion.emotion_scores,
+                "confidence": emotion.confidence,
+                "metrics": emotion.metrics,
             }
             message_json = json.dumps(message_data)
 
@@ -266,7 +267,7 @@ class ROSActionHandler(BaseActionHandler):
 
     def execute_for_emotion(
         self,
-        emotion_result: EmotionResult,
+        emotion_result: NeuralEmotionResult,
         action: ActionCommand | None = None,
     ) -> bool:
         """Execute action and optionally publish emotion.
