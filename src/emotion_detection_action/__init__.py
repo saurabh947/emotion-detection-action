@@ -1,8 +1,16 @@
 """Emotion Detection Action SDK.
 
 A pure-neural, platform-agnostic multimodal emotion detection SDK built on a
-Two-Tower Transformer (VideoMAE + AST) with bidirectional cross-attention and a
-GRU temporal context buffer.
+Two-Tower Transformer with bidirectional cross-attention and a GRU temporal
+context buffer.
+
+Default backbones
+-----------------
+* **Video** — ``trpakov/vit-face-expression`` (AffectNet ViT-B/16, fine-tuned
+  on 450 K facial images, 8-class emotion).  MediaPipe face cropping is applied
+  automatically to each frame before the backbone.
+* **Audio** — ``iic/emotion2vec_base`` via FunASR, pre-trained on multi-corpus
+  speech emotion data (IEMOCAP, MSP-Podcast, RAVDESS, CREMA-D).
 
 Quick start::
 
@@ -13,7 +21,7 @@ Quick start::
 
     import numpy as np
     frames = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
-    result = detector.process(frames)
+    result = detector.process_frames(frames)
     print(result.dominant_emotion)
     print(result.latent_embedding[:4])   # 512-dim VLA context vector
     print(result.metrics)                # stress, engagement, arousal

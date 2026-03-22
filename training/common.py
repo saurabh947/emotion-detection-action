@@ -37,6 +37,22 @@ stress / engagement / arousal annotations.  ``EMOTION_METRIC_DEFAULTS`` maps
 each emotion to a plausible ``[stress, engagement, arousal]`` triplet so the
 metrics head can still be supervised during Phase 1.  Replace these values
 with real annotations if your dataset provides them.
+
+Audio modes
+-----------
+* ``"waveform"`` (default, for emotion2vec) — loads raw float32 PCM
+  and returns a ``(samples,)`` tensor.  No torchaudio transforms needed at
+  inference time; the backbone processes raw waveform directly.
+* ``"mel"`` (legacy, for AST) — converts the audio track to a log
+  mel-spectrogram ``(time, mel)`` tensor using torchaudio.
+
+Class imbalance correction
+--------------------------
+Pass ``class_weights`` (a float list of length 8, one per class in
+``EMOTION_LABELS`` order) to :class:`MultiTaskLoss` to enable
+``nn.CrossEntropyLoss(weight=...)``.  No custom loss code is required — this
+is a standard PyTorch feature.  Pre-computed AffectNet weights are available
+in ``emotion_detection_action.core.config._DEFAULT_AFFECTNET_CLASS_WEIGHTS``.
 """
 
 from __future__ import annotations
@@ -45,7 +61,7 @@ import csv
 import os
 import pathlib
 import random
-from typing import Callable
+from typing import Literal
 
 import numpy as np
 import torch
@@ -129,6 +145,83 @@ def _load_video_frames(
     return torch.stack(tensors)  # (T, 3, H, W)
 
 
+def _load_video_frames_with_crop(
+    path: str,
+    cropper: object,
+    num_frames: int = 16,
+    image_size: int = 224,
+) -> torch.Tensor:
+    """Load and face-crop video frames for AffectNet ViT training.
+
+    Each frame is passed through ``cropper.crop()`` before stacking.
+    Falls back to a black tensor on any error.
+    """
+    try:
+        import cv2  # type: ignore[import]
+    except ImportError:
+        raise RuntimeError("opencv-python is required: pip3 install opencv-python")
+
+    cap = cv2.VideoCapture(path)
+    raw_frames: list[np.ndarray] = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        raw_frames.append(frame)
+    cap.release()
+
+    if not raw_frames:
+        return torch.zeros(num_frames, 3, image_size, image_size)
+
+    indices = np.linspace(0, len(raw_frames) - 1, num_frames, dtype=int)
+    sampled = [raw_frames[i] for i in indices]
+
+    tensors: list[torch.Tensor] = []
+    for bgr in sampled:
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        cropped = cropper.crop(rgb)  # type: ignore[union-attr]
+        t = torch.from_numpy(cropped).permute(2, 0, 1).float() / 255.0
+        tensors.append(t)
+
+    return torch.stack(tensors)  # (T, 3, H, W)
+
+
+def _load_audio_waveform(
+    path: str,
+    sample_rate: int = 16000,
+    max_duration: float = 3.0,
+) -> torch.Tensor | None:
+    """Load raw PCM waveform for emotion2vec.
+
+    Returns a ``(samples,)`` float32 tensor padded / trimmed to
+    ``max_duration`` seconds.  Returns ``None`` when torchaudio is unavailable
+    or the file has no audio track.
+    """
+    try:
+        import torchaudio  # type: ignore[import]
+    except ImportError:
+        return None
+
+    try:
+        waveform, sr = torchaudio.load(path)  # (C, samples)
+    except Exception:
+        return None
+
+    waveform = waveform.mean(0)  # mono → (samples,)
+    if sr != sample_rate:
+        waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
+
+    max_samples = int(sample_rate * max_duration)
+    if waveform.shape[0] > max_samples:
+        waveform = waveform[:max_samples]
+    elif waveform.shape[0] < max_samples:
+        waveform = torch.cat(
+            [waveform, torch.zeros(max_samples - waveform.shape[0])]
+        )
+
+    return waveform  # (samples,)
+
+
 def _load_audio_mel(
     path: str,
     sample_rate: int = 16000,
@@ -138,6 +231,9 @@ def _load_audio_mel(
     target_length: int = 1024,
 ) -> torch.Tensor | None:
     """Load audio from a file and return a ``(time, mel)`` log mel-spectrogram.
+
+    Legacy function for the AST audio backbone.  Prefer :func:`_load_audio_waveform`
+    for emotion2vec.
 
     Returns ``None`` when the file has no audio track or torchaudio cannot
     read it — the model will substitute its learned absent-audio token.
@@ -192,8 +288,12 @@ class SyntheticEmotionDataset(Dataset):
         size: Number of synthetic samples.
         num_frames: Frames per video clip (must match backbone, default 16).
         image_size: Spatial resolution of each frame.
-        mel_time: Time steps in the mel-spectrogram.
-        n_mels: Mel filter-bank bins.
+        audio_mode: ``"waveform"`` (emotion2vec — returns ``(audio_samples,)``)
+            or ``"mel"`` (AST legacy — returns ``(mel_time, n_mels)``).
+        audio_samples: Waveform length in samples (used when audio_mode="waveform").
+            Default is 48 000 = 3 s at 16 kHz.
+        mel_time: Mel-spectrogram time steps (used when audio_mode="mel").
+        n_mels: Mel filter-bank bins (used when audio_mode="mel").
         seed: Random seed for reproducibility.
     """
 
@@ -202,6 +302,8 @@ class SyntheticEmotionDataset(Dataset):
         size: int = 200,
         num_frames: int = 16,
         image_size: int = 224,
+        audio_mode: Literal["waveform", "mel"] = "waveform",
+        audio_samples: int = 48000,
         mel_time: int = 1024,
         n_mels: int = 128,
         seed: int = 42,
@@ -210,9 +312,14 @@ class SyntheticEmotionDataset(Dataset):
         self._video = torch.from_numpy(
             rng.random((size, num_frames, 3, image_size, image_size), dtype=np.float32)
         )
-        self._audio = torch.from_numpy(
-            rng.random((size, mel_time, n_mels), dtype=np.float32)
-        )
+        if audio_mode == "waveform":
+            self._audio = torch.from_numpy(
+                rng.random((size, audio_samples), dtype=np.float32)
+            )
+        else:
+            self._audio = torch.from_numpy(
+                rng.random((size, mel_time, n_mels), dtype=np.float32)
+            )
         labels = rng.integers(0, len(EMOTION_LABELS), size=size)
         self._emotion = torch.from_numpy(labels.astype(np.int64))
         metrics = np.array(
@@ -241,16 +348,29 @@ class SyntheticEmotionDataset(Dataset):
 class EmotionVideoDataset(Dataset):
     """Load emotion data from a directory tree or CSV file.
 
-    Each item is a dict with keys: ``video`` (T,C,H,W), ``audio`` (time,mel)
-    or ``None``, ``emotion`` (long scalar), ``metrics`` (3-dim float tensor).
+    Each item is a dict with keys:
+
+    * ``video``   — ``(T, C, H, W)`` float tensor in [0, 1]
+    * ``audio``   — ``(samples,)`` waveform or ``(time, mel)`` or ``None``
+    * ``emotion`` — long scalar class index
+    * ``metrics`` — ``(3,)`` float tensor [stress, engagement, arousal]
 
     Args:
         samples: List of ``(video_path, emotion_idx, [stress, engagement, arousal])``.
         num_frames: Frames to sample from each clip.
         image_size: Spatial resolution to resize frames to.
-        mel_time: Mel-spectrogram time length.
-        n_mels: Mel filter-bank bins.
-        augment: When ``True``, apply simple temporal jitter and horizontal flip.
+        audio_mode: ``"waveform"`` (emotion2vec — raw 16 kHz PCM) or ``"mel"``
+            (AST legacy — log mel-spectrogram).
+        audio_samples: Waveform length in samples (only used when
+            ``audio_mode="waveform"``).  Default 48 000 = 3 s at 16 kHz.
+        mel_time: Mel-spectrogram time steps (only used when
+            ``audio_mode="mel"``).
+        n_mels: Mel filter-bank bins (only used when ``audio_mode="mel"``).
+        augment: When ``True``, apply horizontal flip and brightness jitter.
+        face_crop: When ``True``, crop the dominant face from each frame using
+            MediaPipe before resizing.  Set to ``True`` when using AffectNet ViT.
+        face_crop_margin: Fractional bbox expansion (see
+            :class:`~models.backbones.FaceCropPipeline`).
     """
 
     def __init__(
@@ -258,16 +378,38 @@ class EmotionVideoDataset(Dataset):
         samples: list[tuple[str, int, list[float]]],
         num_frames: int = 16,
         image_size: int = 224,
+        audio_mode: Literal["waveform", "mel"] = "waveform",
+        audio_samples: int = 48000,
         mel_time: int = 1024,
         n_mels: int = 128,
         augment: bool = False,
+        face_crop: bool = True,
+        face_crop_margin: float = 0.2,
     ) -> None:
         self._samples = samples
         self._num_frames = num_frames
         self._image_size = image_size
+        self._audio_mode = audio_mode
+        self._audio_samples = audio_samples
         self._mel_time = mel_time
         self._n_mels = n_mels
         self._augment = augment
+        self._face_crop = face_crop
+
+        self._cropper: object | None = None
+        if face_crop:
+            try:
+                import sys
+                import pathlib as _pl
+                _sdk_src = str(_pl.Path(__file__).resolve().parents[1] / "src")
+                if _sdk_src not in sys.path:
+                    sys.path.insert(0, _sdk_src)
+                from emotion_detection_action.models.backbones import FaceCropPipeline  # type: ignore[import]
+                self._cropper = FaceCropPipeline(
+                    margin=face_crop_margin, image_size=image_size
+                )
+            except Exception:
+                self._cropper = None  # graceful fallback
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -275,14 +417,17 @@ class EmotionVideoDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         path, emotion_idx, metrics_vals = self._samples[idx]
 
-        video = _load_video_frames(path, self._num_frames, self._image_size)
-        audio = _load_audio_mel(path, target_length=self._mel_time, n_mels=self._n_mels)
+        video = self._load_video(path)
+        if self._audio_mode == "waveform":
+            audio: torch.Tensor | None = _load_audio_waveform(
+                path, max_duration=self._audio_samples / 16000
+            )
+        else:
+            audio = _load_audio_mel(path, target_length=self._mel_time, n_mels=self._n_mels)
 
         if self._augment:
-            # Horizontal flip with 50% probability
             if random.random() < 0.5:
                 video = video.flip(-1)
-            # Small brightness jitter
             video = (video + torch.randn_like(video) * 0.02).clamp(0, 1)
 
         return {
@@ -291,6 +436,14 @@ class EmotionVideoDataset(Dataset):
             "emotion": torch.tensor(emotion_idx, dtype=torch.long),
             "metrics": torch.tensor(metrics_vals, dtype=torch.float32),
         }
+
+    def _load_video(self, path: str) -> torch.Tensor:
+        """Load video frames, applying face crop when enabled."""
+        if self._cropper is not None:
+            return _load_video_frames_with_crop(
+                path, self._cropper, self._num_frames, self._image_size
+            )
+        return _load_video_frames(path, self._num_frames, self._image_size)
 
 
 # ---------------------------------------------------------------------------
@@ -359,22 +512,25 @@ def samples_from_csv(csv_path: str) -> list[tuple[str, int, list[float]]]:
 def collate_fn(batch: list[dict]) -> dict:
     """Custom collate that handles optional ``None`` audio tensors.
 
-    When a sample has no audio (file had no audio track), the batch entry for
-    that position is a zero-tensor of the same shape as the others so we can
-    still form a padded batch.  A ``audio_mask`` boolean tensor marks which
-    batch items have real audio.
+    Supports both waveform audio ``(samples,)`` and mel-spectrogram audio
+    ``(time, mel)``.  When a sample has no audio track, a zero-tensor of the
+    reference shape is substituted so the batch is uniformly shaped.
+    ``audio_mask`` marks which items carry real audio.
     """
     videos = torch.stack([b["video"] for b in batch])
     emotions = torch.stack([b["emotion"] for b in batch])
     metrics = torch.stack([b["metrics"] for b in batch])
 
-    # Determine audio shape from the first non-None sample
     audio_list = [b["audio"] for b in batch]
     ref_audio = next((a for a in audio_list if a is not None), None)
     if ref_audio is None:
-        # No audio at all — pass None to the model
-        return {"video": videos, "audio": None, "emotion": emotions, "metrics": metrics,
-                "audio_mask": torch.zeros(len(batch), dtype=torch.bool)}
+        return {
+            "video": videos,
+            "audio": None,
+            "emotion": emotions,
+            "metrics": metrics,
+            "audio_mask": torch.zeros(len(batch), dtype=torch.bool),
+        }
 
     shape = ref_audio.shape
     audio_mask = torch.tensor([a is not None for a in audio_list])
@@ -382,7 +538,7 @@ def collate_fn(batch: list[dict]) -> dict:
     audios = torch.stack(filled)
     return {
         "video": videos,
-        "audio": audios,
+        "audio": audios,   # (B, samples) for waveform or (B, time, mel) for mel
         "emotion": emotions,
         "metrics": metrics,
         "audio_mask": audio_mask,
@@ -457,14 +613,30 @@ def build_dataloaders(
 class MultiTaskLoss(nn.Module):
     """Weighted sum of emotion classification + attention metrics losses.
 
+    Class-imbalance correction is handled entirely by PyTorch's built-in
+    ``nn.CrossEntropyLoss(weight=...)`` — no custom loss code is needed.
+
     Args:
-        emotion_weight: Weight for the cross-entropy emotion loss.
-        metrics_weight: Weight for the MSE attention metrics loss.
+        emotion_weight: Scalar weight for the cross-entropy emotion loss
+            term in the combined loss (not the per-class weights).
+        metrics_weight: Scalar weight for the MSE attention metrics loss.
+        class_weights: Optional length-8 list of per-class weights for the
+            cross-entropy loss.  Pass these to correct for AffectNet class
+            imbalance (e.g. ``_DEFAULT_AFFECTNET_CLASS_WEIGHTS``).  When
+            ``None``, unweighted cross-entropy is used.
     """
 
-    def __init__(self, emotion_weight: float = 1.0, metrics_weight: float = 0.5) -> None:
+    def __init__(
+        self,
+        emotion_weight: float = 1.0,
+        metrics_weight: float = 0.5,
+        class_weights: list[float] | None = None,
+    ) -> None:
         super().__init__()
-        self._ce = nn.CrossEntropyLoss()
+        ce_weight: torch.Tensor | None = None
+        if class_weights is not None:
+            ce_weight = torch.tensor(class_weights, dtype=torch.float32)
+        self._ce = nn.CrossEntropyLoss(weight=ce_weight)
         self._mse = nn.MSELoss()
         self._ew = emotion_weight
         self._mw = metrics_weight
@@ -481,6 +653,9 @@ class MultiTaskLoss(nn.Module):
         Returns:
             ``(total_loss, emotion_loss, metrics_loss)``
         """
+        # Move class-weight tensor to the same device as the logits
+        if self._ce.weight is not None and self._ce.weight.device != emotion_logits.device:
+            self._ce.weight = self._ce.weight.to(emotion_logits.device)
         emotion_loss = self._ce(emotion_logits, emotion_targets)
         metrics_loss = self._mse(metrics_pred, metrics_targets)
         total = self._ew * emotion_loss + self._mw * metrics_loss

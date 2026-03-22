@@ -3,7 +3,9 @@
 
 What Phase 1 trains
 -------------------
-The VideoMAE and AST backbone weights are **frozen** (no gradient updates).
+All backbone weights are **frozen** (no gradient updates).  This includes the
+AffectNet ViT video backbone and the emotion2vec audio backbone (which is
+always frozen because FunASR does not expose gradient flow).
 Only the following layers learn new weights:
 
 * Video projection  (backbone hidden → 512)
@@ -197,9 +199,17 @@ def parse_args() -> argparse.Namespace:
 
     # ── Model ────────────────────────────────────────────────────────────────
     p.add_argument("--pretrained", action="store_true",
-                   help="Load HuggingFace pretrained backbone weights (~1.8 GB download)")
-    p.add_argument("--video-model", choices=["videomae", "vivit"], default="videomae",
-                   help="Video backbone (videomae=16 frames recommended)")
+                   help="Load HuggingFace / FunASR pretrained backbone weights")
+    p.add_argument("--video-model",
+                   choices=["affectnet_vit", "videomae", "vivit"],
+                   default="affectnet_vit",
+                   help="Video backbone: affectnet_vit=best accuracy, videomae/vivit=legacy")
+    p.add_argument("--audio-model",
+                   choices=["emotion2vec", "ast"],
+                   default="emotion2vec",
+                   help="Audio backbone: emotion2vec=best accuracy, ast=legacy mel-spectrogram")
+    p.add_argument("--no-face-crop", dest="face_crop", action="store_false", default=True,
+                   help="Disable face cropping (only relevant for affectnet_vit)")
     p.add_argument("--d-model", type=int, default=512,
                    help="Shared embedding dimension (must match any loaded checkpoint)")
     p.add_argument("--cross-attn-layers", type=int, default=2)
@@ -223,6 +233,15 @@ def parse_args() -> argparse.Namespace:
                    help="Enable simple video augmentation (flip + brightness jitter)")
     p.add_argument("--emotion-loss-weight", type=float, default=1.0)
     p.add_argument("--metrics-loss-weight", type=float, default=0.5)
+    p.add_argument(
+        "--class-weights", metavar="W0,W1,...,W7", default=None,
+        help=(
+            "Comma-separated per-class weights for the emotion CrossEntropyLoss "
+            "(8 values, one per class in EMOTION_ORDER).  Corrects for AffectNet "
+            "class imbalance.  Example (AffectNet defaults): "
+            "5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50"
+        ),
+    )
 
     # ── Scheduler ────────────────────────────────────────────────────────────
     p.add_argument("--scheduler", choices=["cosine", "step", "none"], default="cosine",
@@ -330,11 +349,14 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────
     num_frames = 32 if args.video_model == "vivit" else 16
+    audio_mode = "mel" if args.audio_model == "ast" else "waveform"
     config = BackboneConfig(
-        video_model=args.video_model,   # type: ignore[arg-type]
+        video_model=args.video_model,    # type: ignore[arg-type]
+        audio_model=args.audio_model,    # type: ignore[arg-type]
         pretrained=args.pretrained,
         d_model=args.d_model,
         video_num_frames=num_frames,
+        face_crop_enabled=args.face_crop,
     )
 
     if is_main:
@@ -372,19 +394,35 @@ def main() -> None:
         print("\n  Loading dataset …")
 
     if args.synthetic:
-        dataset = SyntheticEmotionDataset(size=200, num_frames=num_frames)
+        dataset = SyntheticEmotionDataset(
+            size=200, num_frames=num_frames, audio_mode=audio_mode
+        )
         if is_main:
-            print("  Synthetic dataset : 200 random samples")
+            print(f"  Synthetic dataset : 200 random samples  (audio_mode={audio_mode})")
     elif args.data_dir:
         samples = samples_from_directory(args.data_dir)
-        dataset = EmotionVideoDataset(samples, num_frames=num_frames, augment=args.augment)
+        dataset = EmotionVideoDataset(
+            samples,
+            num_frames=num_frames,
+            augment=args.augment,
+            audio_mode=audio_mode,
+            face_crop=args.face_crop,
+        )
         if is_main:
-            print(f"  Directory dataset : {len(samples)} clips from {args.data_dir!r}")
+            print(f"  Directory dataset : {len(samples)} clips from {args.data_dir!r}"
+                  f"  (audio_mode={audio_mode}, face_crop={args.face_crop})")
     else:
         samples = samples_from_csv(args.csv)
-        dataset = EmotionVideoDataset(samples, num_frames=num_frames, augment=args.augment)
+        dataset = EmotionVideoDataset(
+            samples,
+            num_frames=num_frames,
+            augment=args.augment,
+            audio_mode=audio_mode,
+            face_crop=args.face_crop,
+        )
         if is_main:
-            print(f"  CSV dataset : {len(samples)} clips from {args.csv!r}")
+            print(f"  CSV dataset : {len(samples)} clips from {args.csv!r}"
+                  f"  (audio_mode={audio_mode}, face_crop={args.face_crop})")
 
     train_loader, val_loader, train_sampler = build_dataloaders(
         dataset,
@@ -403,9 +441,22 @@ def main() -> None:
     # ── Optimiser & loss ──────────────────────────────────────────────────
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=effective_lr, weight_decay=args.weight_decay)
+
+    class_weights: list[float] | None = None
+    if args.class_weights:
+        try:
+            class_weights = [float(w) for w in args.class_weights.split(",")]
+            if len(class_weights) != 8:
+                raise ValueError(f"Expected 8 class weights, got {len(class_weights)}")
+            if is_main:
+                print(f"  Class weights : {class_weights}")
+        except ValueError as e:
+            raise SystemExit(f"ERROR: --class-weights invalid: {e}") from e
+
     criterion = MultiTaskLoss(
         emotion_weight=args.emotion_loss_weight,
         metrics_weight=args.metrics_loss_weight,
+        class_weights=class_weights,
     )
     scheduler = build_scheduler(optimizer, args.scheduler, args.epochs, args.warmup_epochs)
 
@@ -494,20 +545,30 @@ def main() -> None:
 
             if val_acc >= best_val_acc:
                 best_val_acc = val_acc
+                _ckpt_cfg = {
+                    "d_model": args.d_model,
+                    "video_model": args.video_model,
+                    "audio_model": args.audio_model,
+                    "cross_attn_layers": args.cross_attn_layers,
+                    "gru_layers": args.gru_layers,
+                }
                 save_checkpoint(
                     best_path, model, optimizer, epoch, best_val_acc,
-                    {"d_model": args.d_model, "video_model": args.video_model,
-                     "cross_attn_layers": args.cross_attn_layers, "gru_layers": args.gru_layers},
-                    {"phase": 1},
+                    _ckpt_cfg, {"phase": 1},
                 )
                 print(f"          ✓ Best checkpoint → {best_path}  (acc={val_acc:.1%})")
 
             if epoch % args.save_every == 0 or epoch == args.epochs:
+                _ckpt_cfg = {
+                    "d_model": args.d_model,
+                    "video_model": args.video_model,
+                    "audio_model": args.audio_model,
+                    "cross_attn_layers": args.cross_attn_layers,
+                    "gru_layers": args.gru_layers,
+                }
                 save_checkpoint(
                     last_path, model, optimizer, epoch, best_val_acc,
-                    {"d_model": args.d_model, "video_model": args.video_model,
-                     "cross_attn_layers": args.cross_attn_layers, "gru_layers": args.gru_layers},
-                    {"phase": 1},
+                    _ckpt_cfg, {"phase": 1},
                 )
 
         # Synchronise all ranks before the next epoch
@@ -525,7 +586,8 @@ def main() -> None:
             print(f"  torchrun --nproc_per_node={world_size} training/train_phase2.py \\")
         else:
             print(f"  python training/train_phase2.py \\")
-        print(f"      --checkpoint {best_path} --data-dir <DIR> --pretrained")
+        print(f"      --checkpoint {best_path} --data-dir <DIR> --pretrained \\\n"
+              f"      --video-model {args.video_model} --audio-model {args.audio_model}")
         print(f"{'='*65}")
 
     cleanup_ddp(is_ddp)

@@ -105,12 +105,14 @@ class TestNeuralPipeline:
         detector = EmotionDetector(Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
+            two_tower_face_crop_enabled=False,  # skip MediaPipe in CI
             vla_enabled=False,
         ))
         detector.initialize()
 
         clip = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
-        audio = np.random.randn(8000).astype("float32")
+        # emotion2vec stub receives raw waveform (samples,)
+        audio = np.random.randn(16000 * 3).astype("float32")
         result = detector.process(clip, audio)
 
         assert isinstance(result, NeuralEmotionResult)
@@ -129,6 +131,7 @@ class TestNeuralPipeline:
         detector = EmotionDetector(Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
+            two_tower_face_crop_enabled=False,
             vla_enabled=False,
         ))
         detector.initialize()
@@ -148,6 +151,7 @@ class TestNeuralPipeline:
         detector = EmotionDetector(Config(
             two_tower_pretrained=False,
             two_tower_device="cpu",
+            two_tower_face_crop_enabled=False,
             vla_enabled=False,
         ))
         detector.initialize()

@@ -8,38 +8,42 @@ for robotics, built on a Two-Tower Multimodal Transformer.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                     NeuralFusionModel  (models/fusion.py)                    │
-│                                                                              │
-│  ┌─────────────────┐     ┌────────────────────────────────────┐              │
-│  │  VideoBackbone  │     │  Bidirectional CrossAttentionBlock │ × N layers   │
-│  │  (VideoMAE ✓    │     │                                    │              │
-│  │   or ViViT)     │──┐  │   video tokens ↔ audio tokens      │              │
-│  └─────────────────┘  │  │   Q=video  K/V=audio (V→A)         │              │
-│                       ├─►│   Q=audio  K/V=video (A→V)         │              │
-│  ┌─────────────────┐  │  └────────────────┬───────────────────┘              │
-│  │  AudioBackbone  │──┘                   │ mean-pool                        │
-│  │  (AST)          │              ┌───────▼───────┐                          │
-│  └─────────────────┘              │  Fused CLS    │  (B, d_model=512)        │
-│                                   └───────┬───────┘                          │
-│                                           │                                  │
-│                              ┌────────────▼────────────┐                     │
-│                              │  TemporalContextBuffer  │  GRU (2 layers)     │
-│                              │  ~2-second rolling      │  prevents flicker   │
-│                              │  window                 │                     │
-│                              └────────────┬────────────┘                     │
-│                                           │  latent_embedding (512-dim)      │
-│                              ┌────────────┴────────────┐                     │
-│                              ▼                         ▼                     │
-│                   ┌──────────────────┐     ┌────────────────────────────┐    │
-│                   │  Emotion head    │     │     Metrics head           │    │
-│                   │  Softmax (8)     │     │     Sigmoid (3)            │    │
-│                   └──────────────────┘     └────────────────────────────┘    │
-│                   angry · disgusted ·       stress · engagement · arousal    │
-│                   fearful · happy ·                                          │
-│                   neutral · sad ·                                            │
-│                   surprised · unclear                                        │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                     NeuralFusionModel  (models/fusion.py)                      │
+│                                                                                │
+│  ┌──────────────────────┐   ┌──────────────────────────────────────────┐       │
+│  │     VideoBackbone    │   │  VideoTemporalBlock  (intra-clip self-   │       │
+│  │  AffectNet ViT ✓     │──►│  attention + positional encoding over T  │       │
+│  │  (trpakov/vit-face-  │   │  per-frame CLS tokens)                   │       │
+│  │   expression)        │   └──────────────────┬───────────────────────┘       │
+│  └──────────────────────┘                      │                               │
+│  Face crop per frame ──────────────────────────┘                               │
+│  (MediaPipe, auto-applied)                     ├─┐                             │
+│                                                │ │  ┌────────────────────────┐ │
+│  ┌──────────────────────┐                      │ └─►│  Bidirectional Cross   │ │
+│  │     AudioBackbone    │                      │    │  AttentionBlock × N    │ │
+│  │  emotion2vec ✓       │──────────────────────┘    │  video ↔ audio         │ │
+│  │  (iic/emotion2vec_   │   raw waveform (16 kHz)   └──────────┬─────────────┘ │
+│  │   base via FunASR)   │                                      │ mean-pool     │
+│  └──────────────────────┘                              ┌───────▼─────────┐     │
+│                                                        │   Fused CLS     │     │
+│                                                        │ (B, d_model=512)│     │
+│                                                        └────────┬────────┘     │
+│                                              ┌──────────────────▼──────┐       │
+│                                              │  TemporalContextBuffer  │       │
+│                                              │  GRU (2 layers) — 2-s   │       │
+│                                              │  inter-clip rolling ctx │       │
+│                                              └──────────┬──────────────┘       │
+│                                                         │  latent_embedding    │
+│                                         ┌───────────────┴───────────┐          │
+│                                         ▼                           ▼          │
+│                              ┌──────────────────┐   ┌────────────────────┐     │
+│                              │  Emotion head    │   │   Metrics head     │     │
+│                              │  Softmax (8)     │   │   Sigmoid (3)      │     │
+│                              └──────────────────┘   └────────────────────┘     │
+│                     angry · disgusted · fearful · happy · neutral · sad ·      │
+│                     surprised · unclear        stress · engagement · arousal   │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Output contract
@@ -73,26 +77,30 @@ directly into VLA models (e.g., OpenVLA) as the emotion context.
 
 ---
 
-## Video backbone comparison: VideoMAE vs ViViT
+## Backbone selection
 
-| Property | **VideoMAE** ✓ recommended | ViViT-B/16x2 |
+### Video — AffectNet ViT (default, recommended)
+
+| Property | **AffectNet ViT** ✓ default | VideoMAE (legacy) | ViViT (legacy) |
+|---|---|---|---|
+| HuggingFace ID | `trpakov/vit-face-expression` | `MCG-NJU/videomae-base` | `google/vivit-b-16x2-kinetics400` |
+| Pre-training task | **Emotion classification** on 450 K faces | Masked autoencoding | Action recognition |
+| Input | Per-frame face crops (auto-applied) | 16-frame clip | 32-frame clip |
+| Output | `(B, T, 768)` — 1 CLS per frame | `(B, ~1568, 768)` patch tokens | `(B, ~3137, 768)` |
+| Domain fit | **Direct** — trained on emotion | Indirect | Indirect |
+| Requires face crop | Yes (MediaPipe, automatic) | No | No |
+
+### Audio — emotion2vec (default, recommended)
+
+| Property | **emotion2vec** ✓ default | AST (legacy) |
 |---|---|---|
-| HuggingFace ID | `MCG-NJU/videomae-base` | `google/vivit-b-16x2-kinetics400` |
-| Clip length | **16 frames** | 32 frames |
-| Pretraining | Masked Autoencoding (MAE) | Supervised (Kinetics-400) |
-| Parameters | 87 M | 86 M |
-| CPU latency (1 clip) | **~300 ms** | ~580 ms |
-| Fine-tuning on small data | **Excellent** | Good |
-| Latent space quality | **High** (great for VLA) | Moderate |
-| Attention window @ 30fps | **0.53 s** | 1.07 s |
+| Loader | FunASR (required: `funasr`, `modelscope`) | HuggingFace transformers |
+| Pre-training task | **Speech emotion** (IEMOCAP, MSP, RAVDESS, CREMA-D) | AudioSet sound classification |
+| Input | `(B, samples)` raw 16 kHz waveform | `(B, time, mel)` mel-spectrogram |
+| Output | `(B, T_a, 768)` frame features | `(B, T_a, 768)` CLS + patch tokens |
 
-**Why VideoMAE?**
-
-1. Shorter clip → **~2× faster inference**, lower real-time latency.
-2. MAE pretraining produces richer internal representations — the `latent_embedding`
-   captures more nuanced emotional features for VLA integration.
-3. Emotion datasets are small; MAE-pretrained models transfer significantly
-   better than supervised ones to small target datasets (AffectNet, RAVDESS).
+emotion2vec is a **required** dependency. `funasr` and `modelscope` are installed
+automatically with the SDK — no extra steps needed.
 
 ---
 
@@ -101,8 +109,11 @@ directly into VLA models (e.g., OpenVLA) as the emotion context.
 ```
 src/emotion_detection_action/
 ├── models/
-│   ├── backbones.py        ← VideoBackbone (VideoMAE/ViViT) + AudioBackbone (AST)
-│   ├── fusion.py           ← NeuralFusionModel · CrossAttentionBlock · TemporalContextBuffer
+│   ├── backbones.py        ← VideoBackbone (AffectNet ViT/VideoMAE/ViViT)
+│   │                          AudioBackbone (emotion2vec/AST)
+│   │                          FaceCropPipeline (MediaPipe face detection)
+│   ├── fusion.py           ← NeuralFusionModel · VideoTemporalBlock
+│   │                          CrossAttentionBlock · TemporalContextBuffer
 │   └── vla/                ← OpenVLA integration (optional)
 ├── core/
 │   ├── detector.py         ← EmotionDetector (pure-neural, platform-agnostic)
@@ -126,7 +137,7 @@ source venv/bin/activate
 pip3 install -e ".[dev]"
 ```
 
-Core dependencies: `torch`, `torchaudio`, `transformers`, `pydantic>=2`, `numpy`, `opencv-python`.
+Core dependencies: `torch`, `torchaudio`, `transformers`, `pydantic>=2`, `numpy`, `opencv-python`, `mediapipe`, `funasr`, `modelscope`.
 
 ---
 
@@ -144,14 +155,14 @@ python3 src/emotion_detection_action/models/fusion.py
 # Stub backbones — instant, no download required
 python3 examples/neural_stream_demo.py
 
-# Pretrained backbones (downloads ~1.8 GB VideoMAE + AST weights once)
+# Pretrained backbones (downloads AffectNet ViT + emotion2vec weights)
 python3 examples/neural_stream_demo.py --pretrained
 
 # INT8 quantization for low-latency deployment
 python3 examples/neural_stream_demo.py --quantize
 
-# ViViT backbone instead of VideoMAE
-python3 examples/neural_stream_demo.py --video-model vivit --pretrained
+# Legacy VideoMAE + AST backbone
+python3 examples/neural_stream_demo.py --video-model videomae --audio-model ast --pretrained
 ```
 
 ### Real-time webcam demo (OpenCV visualisation)
@@ -160,7 +171,7 @@ python3 examples/neural_stream_demo.py --video-model vivit --pretrained
 # Stub backbones — instant, no download
 python3 examples/neural_stream_demo.py --webcam
 
-# Pretrained backbones (downloads ~1.8 GB once)
+# Pretrained backbones + face crop (best accuracy)
 python3 examples/neural_stream_demo.py --webcam --pretrained
 
 # With your fine-tuned checkpoint
@@ -174,15 +185,16 @@ from emotion_detection_action import Config, EmotionDetector
 import numpy as np
 
 detector = EmotionDetector(Config(
-    two_tower_pretrained=True,   # downloads VideoMAE + AST weights once
-    two_tower_device="cpu",      # "cuda" or "mps" for GPU
+    two_tower_pretrained=True,     # downloads AffectNet ViT + emotion2vec weights
+    two_tower_device="cpu",        # "cuda" or "mps" for GPU
+    two_tower_face_crop_enabled=True,  # auto face-crop per frame (MediaPipe)
     vla_enabled=False,
 ))
 detector.initialize()
 
-# Pass a (T, H, W, 3) RGB clip + optional raw PCM audio
+# Pass a (T, H, W, 3) RGB clip + optional raw PCM audio (16 kHz)
 clip  = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
-audio = np.random.randn(8000).astype("float32")   # 0.5 s @ 16 kHz
+audio = np.random.randn(16000 * 3).astype("float32")  # 3 s @ 16 kHz
 result = detector.process(clip, audio)
 
 print(result.dominant_emotion)   # e.g. "happy" — "unclear" when no person / low confidence
@@ -218,21 +230,37 @@ detector = EmotionDetector(Config(...), action_handler=ReachyHandler())
 
 | Field | Default | Description |
 |---|---|---|
-| `two_tower_video_model` | `"videomae"` | `"videomae"` or `"vivit"` |
-| `two_tower_video_backbone` | `"MCG-NJU/videomae-base"` | HuggingFace model ID |
-| `two_tower_audio_backbone` | `"MIT/ast-finetuned-audioset-10-10-0.4593"` | HuggingFace model ID |
-| `two_tower_pretrained` | `True` | Download pretrained HuggingFace weights |
-| `two_tower_model_path` | `None` | Path to a fine-tuned `NeuralFusionModel` checkpoint (e.g. `outputs/phase2_best.pt`) |
+| `two_tower_video_model` | `"affectnet_vit"` | `"affectnet_vit"` (best), `"videomae"`, or `"vivit"` |
+| `two_tower_audio_model` | `"emotion2vec"` | `"emotion2vec"` (best) or `"ast"` (legacy) |
+| `two_tower_video_backbone` | `"trpakov/vit-face-expression"` | HuggingFace model ID |
+| `two_tower_audio_backbone` | `"iic/emotion2vec_base"` | FunASR / HuggingFace model ID |
+| `two_tower_pretrained` | `True` | Download pretrained weights |
+| `two_tower_model_path` | `None` | Path to fine-tuned checkpoint (e.g. `outputs/phase2_best.pt`) |
 | `two_tower_device` | `"cpu"` | `"cpu"`, `"cuda"`, or `"mps"` |
 | `two_tower_d_model` | `512` | Shared projection / cross-attention dim |
 | `two_tower_cross_attn_layers` | `2` | Bidirectional cross-attention layers |
-| `two_tower_gru_layers` | `2` | GRU depth in temporal context buffer |
+| `two_tower_gru_layers` | `2` | GRU depth in inter-clip temporal buffer |
 | `two_tower_video_frames` | `16` | Frames per clip (auto-set to 32 for ViViT) |
-| `two_tower_video_freeze_layers` | `8` | VideoMAE encoder layers to freeze |
-| `two_tower_audio_freeze_layers` | `6` | AST encoder layers to freeze |
-| `two_tower_n_mels` | `128` | Mel bins for audio spectrogram |
-| `two_tower_n_fft` | `400` | FFT window size for mel spectrogram |
-| `two_tower_hop_length` | `160` | Hop length for mel spectrogram (10 ms @ 16 kHz) |
+| `two_tower_video_freeze_layers` | `6` | Video encoder layers to freeze during training |
+| `two_tower_audio_freeze_layers` | `6` | Audio encoder layers to freeze during training |
+| `two_tower_face_crop_enabled` | `True` | Auto face-crop via MediaPipe (AffectNet ViT only) |
+| `two_tower_face_crop_margin` | `0.2` | Fractional bbox expansion before crop |
+| `two_tower_face_min_confidence` | `0.5` | MediaPipe min face confidence (falls back to centre crop) |
+| `two_tower_emotion_class_weights` | `None` | 8-element list for `CrossEntropyLoss(weight=...)` — corrects AffectNet class imbalance |
+| `two_tower_n_mels` | `128` | Mel bins (AST legacy only) |
+| `two_tower_n_fft` | `400` | FFT window (AST legacy only) |
+| `two_tower_hop_length` | `160` | Hop length (AST legacy only) |
+
+**AffectNet class-imbalance correction** (no custom code needed):
+
+```python
+from emotion_detection_action.core.config import _DEFAULT_AFFECTNET_CLASS_WEIGHTS
+
+cfg = Config(two_tower_emotion_class_weights=_DEFAULT_AFFECTNET_CLASS_WEIGHTS)
+# These weights are then passed to nn.CrossEntropyLoss(weight=...) during training.
+# EMOTION_ORDER = ["angry","disgusted","fearful","happy","neutral","sad","surprised","unclear"]
+# Weights  ≈    [5.70,    35.50,     20.50,    1.00,   1.90,   5.50,   9.60,     20.50]
+```
 
 ---
 
@@ -249,15 +277,25 @@ Supported sources: **RAVDESS**, **CREMA-D**, **MELD**.
 ### Phase 1 — freeze backbones, train heads
 
 ```bash
-python3 training/train_phase1.py --data-dir data/combined --epochs 20 --batch-size 4
-# Multi-GPU: torchrun --standalone --nproc_per_node=N training/train_phase1.py ...
+# AffectNet ViT + emotion2vec (recommended, with class-imbalance correction)
+python3 training/train_phase1.py \
+    --data-dir data/combined --pretrained --epochs 20 --batch-size 4 \
+    --class-weights "5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50"
+
+# Multi-GPU:
+torchrun --standalone --nproc_per_node=N training/train_phase1.py \
+    --data-dir data/combined --pretrained --batch-size 16 \
+    --class-weights "5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50"
 ```
 
 ### Phase 2 — unfreeze top layers, fine-tune end-to-end
 
 ```bash
-python3 training/train_phase2.py --data-dir data/combined --epochs 10 --no-scale-lr
-# Automatically loads outputs/phase1_best.pt; saves outputs/phase2_best.pt
+python3 training/train_phase2.py \
+    --checkpoint outputs/phase1_best.pt \
+    --data-dir data/combined --pretrained --epochs 10 --no-scale-lr \
+    --class-weights "5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50"
+# Saves outputs/phase2_best.pt
 ```
 
 ### Load a fine-tuned checkpoint
@@ -283,7 +321,7 @@ python3 training/reset_model.py   # factory reset — deletes outputs/ checkpoin
 |---|---|
 | Both modalities | Full cross-attention fusion |
 | `video_frames=None` | Learned absent-video token substituted |
-| `audio_spectrograms=None` | Learned absent-audio token substituted |
+| `audio=None` | Learned absent-audio token substituted |
 | Both `None` | `ValueError` raised |
 
 ---

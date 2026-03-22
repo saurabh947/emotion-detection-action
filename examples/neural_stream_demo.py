@@ -45,7 +45,7 @@ Usage
     # Webcam, GPU, 2 inference workers, INT8 quantized
     python examples/neural_stream_demo.py --webcam --device cuda --workers 2 --quantize
 
-    # Simulation benchmark: ViViT backbone
+    # Simulation benchmark: ViViT backbone (legacy)
     python examples/neural_stream_demo.py --video-model vivit --fps 60 --duration 10
 
     # High-throughput GPU config
@@ -356,7 +356,7 @@ def run_webcam(
     device: str = "cpu",
     pretrained: bool = False,
     quantize: bool = False,
-    video_model: str = "videomae",
+    video_model: str = "affectnet_vit",
     num_workers: int = 1,
     max_queue_size: int = 4,
     model_path: str | None = None,
@@ -477,7 +477,7 @@ def run_simulation(
     device: str = "cpu",
     pretrained: bool = False,
     quantize: bool = False,
-    video_model: str = "videomae",
+    video_model: str = "affectnet_vit",
     num_workers: int = 1,
     max_queue_size: int = 4,
     model_path: str | None = None,
@@ -614,11 +614,16 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cpu",
                         help="Torch device: cpu | cuda | mps")
     parser.add_argument("--pretrained", action="store_true",
-                        help="Download HuggingFace pretrained weights (~1.8 GB)")
+                        help="Download pretrained backbone weights (AffectNet ViT + emotion2vec)")
     parser.add_argument("--quantize", action="store_true",
                         help="Apply INT8 dynamic quantization")
-    parser.add_argument("--video-model", choices=["videomae", "vivit"], default="videomae",
-                        help="Video backbone (videomae=16 frames, vivit=32 frames)")
+    parser.add_argument(
+        "--video-model",
+        choices=["affectnet_vit", "videomae", "vivit"],
+        default="affectnet_vit",
+        help="Video backbone: affectnet_vit (default, best accuracy), "
+             "videomae or vivit (legacy)",
+    )
     parser.add_argument("--workers", type=int, default=1,
                         help="Inference worker threads (>1 for GPU parallelism)")
     parser.add_argument("--queue-size", type=int, default=4,

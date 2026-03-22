@@ -4,13 +4,17 @@
 What Phase 2 trains
 -------------------
 Starting from a Phase 1 checkpoint (where only the fusion heads learned),
-Phase 2 **unfreezes the top N encoder layers** of both the VideoMAE and AST
-backbones and fine-tunes the whole network jointly.
+Phase 2 **unfreezes the top N encoder layers** of the AffectNet ViT video
+backbone and fine-tunes the whole network jointly.
+
+Note: the emotion2vec audio backbone (loaded via FunASR) is **always frozen**
+because FunASR does not expose gradient flow.  Only the AffectNet ViT layers,
+projection layers, cross-attention blocks, GRU, and output heads are updated.
 
 Two learning-rate groups are used:
 
 * **Backbone layers** : very small LR (``--backbone-lr``, default 1e-5) to
-  prevent catastrophic forgetting of the ImageNet/AudioSet pretraining.
+  prevent catastrophic forgetting of the AffectNet/ImageNet pretraining.
 * **Heads + fusion**  : larger LR (``--head-lr``, default 1e-4) — same as
   Phase 1, keeps adapting to the emotion task.
 
@@ -206,8 +210,15 @@ def parse_args() -> argparse.Namespace:
 
     # ── Model ────────────────────────────────────────────────────────────────
     p.add_argument("--pretrained", action="store_true",
-                   help="Load HuggingFace pretrained backbone weights (required for real data)")
-    p.add_argument("--video-model", choices=["videomae", "vivit"], default="videomae")
+                   help="Load HuggingFace / FunASR pretrained backbone weights (required for real data)")
+    p.add_argument("--video-model",
+                   choices=["affectnet_vit", "videomae", "vivit"],
+                   default="affectnet_vit")
+    p.add_argument("--audio-model",
+                   choices=["emotion2vec", "ast"],
+                   default="emotion2vec")
+    p.add_argument("--no-face-crop", dest="face_crop", action="store_false", default=True,
+                   help="Disable face cropping (only relevant for affectnet_vit)")
     p.add_argument("--d-model", type=int, default=512)
     p.add_argument("--cross-attn-layers", type=int, default=2)
     p.add_argument("--gru-layers", type=int, default=2)
@@ -235,6 +246,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--augment", action="store_true")
     p.add_argument("--emotion-loss-weight", type=float, default=1.0)
     p.add_argument("--metrics-loss-weight", type=float, default=0.5)
+    p.add_argument(
+        "--class-weights", metavar="W0,W1,...,W7", default=None,
+        help=(
+            "Comma-separated per-class weights for emotion CrossEntropyLoss "
+            "(8 values, EMOTION_ORDER).  Example (AffectNet): "
+            "5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50"
+        ),
+    )
 
     # ── Scheduler ────────────────────────────────────────────────────────────
     p.add_argument("--scheduler", choices=["cosine", "step", "none"], default="cosine")
@@ -282,7 +301,11 @@ def unfreeze_top_layers(model: NeuralFusionModel, n_layers: int) -> int:
         try:
             encoder_layers = backbone._backbone.encoder.layer
         except AttributeError:
-            print(f"    {backbone_name}: no encoder layers found (stub?), skipping partial unfreeze")
+            # emotion2vec (FunASR) has no .encoder.layer and is always frozen;
+            # stub backbones also land here.  backbone.unfreeze() is a no-op for
+            # FunASR, so this is safe.
+            print(f"    {backbone_name}: no HuggingFace encoder layers "
+                  f"(emotion2vec/stub) — skipping partial unfreeze")
             backbone.unfreeze()
             continue
 
@@ -394,11 +417,14 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────
     num_frames = 32 if args.video_model == "vivit" else 16
+    audio_mode = "mel" if args.audio_model == "ast" else "waveform"
     config = BackboneConfig(
-        video_model=args.video_model,   # type: ignore[arg-type]
+        video_model=args.video_model,    # type: ignore[arg-type]
+        audio_model=args.audio_model,    # type: ignore[arg-type]
         pretrained=args.pretrained,
         d_model=args.d_model,
         video_num_frames=num_frames,
+        face_crop_enabled=args.face_crop,
     )
 
     if is_main:
@@ -454,19 +480,35 @@ def main() -> None:
         print("\n  Loading dataset …")
 
     if args.synthetic:
-        dataset = SyntheticEmotionDataset(size=200, num_frames=num_frames)
+        dataset = SyntheticEmotionDataset(
+            size=200, num_frames=num_frames, audio_mode=audio_mode
+        )
         if is_main:
-            print("  Synthetic dataset : 200 random samples")
+            print(f"  Synthetic dataset : 200 random samples  (audio_mode={audio_mode})")
     elif args.data_dir:
         samples = samples_from_directory(args.data_dir)
-        dataset = EmotionVideoDataset(samples, num_frames=num_frames, augment=args.augment)
+        dataset = EmotionVideoDataset(
+            samples,
+            num_frames=num_frames,
+            augment=args.augment,
+            audio_mode=audio_mode,
+            face_crop=args.face_crop,
+        )
         if is_main:
-            print(f"  Directory dataset : {len(samples)} clips from {args.data_dir!r}")
+            print(f"  Directory dataset : {len(samples)} clips from {args.data_dir!r}"
+                  f"  (audio_mode={audio_mode}, face_crop={args.face_crop})")
     else:
         samples = samples_from_csv(args.csv)
-        dataset = EmotionVideoDataset(samples, num_frames=num_frames, augment=args.augment)
+        dataset = EmotionVideoDataset(
+            samples,
+            num_frames=num_frames,
+            augment=args.augment,
+            audio_mode=audio_mode,
+            face_crop=args.face_crop,
+        )
         if is_main:
-            print(f"  CSV dataset : {len(samples)} clips from {args.csv!r}")
+            print(f"  CSV dataset : {len(samples)} clips from {args.csv!r}"
+                  f"  (audio_mode={audio_mode}, face_crop={args.face_crop})")
 
     train_loader, val_loader, train_sampler = build_dataloaders(
         dataset,
@@ -489,9 +531,21 @@ def main() -> None:
     )
     optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
+    class_weights: list[float] | None = None
+    if args.class_weights:
+        try:
+            class_weights = [float(w) for w in args.class_weights.split(",")]
+            if len(class_weights) != 8:
+                raise ValueError(f"Expected 8 class weights, got {len(class_weights)}")
+            if is_main:
+                print(f"  Class weights : {class_weights}")
+        except ValueError as e:
+            raise SystemExit(f"ERROR: --class-weights invalid: {e}") from e
+
     criterion = MultiTaskLoss(
         emotion_weight=args.emotion_loss_weight,
         metrics_weight=args.metrics_loss_weight,
+        class_weights=class_weights,
     )
     scheduler = build_scheduler(optimizer, args.scheduler, args.epochs, args.warmup_epochs)
 

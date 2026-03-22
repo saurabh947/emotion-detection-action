@@ -5,8 +5,8 @@ What "reset" means
 ------------------
 The SDK has three layers of learned weights:
 
-1. **HuggingFace pretrained backbones** (VideoMAE + AST) — downloaded once
-   to the HuggingFace cache (``~/.cache/huggingface/hub/``).
+1. **HuggingFace pretrained backbones** (AffectNet ViT + emotion2vec) — downloaded
+   once to the HuggingFace / FunASR cache.
    These are the *factory defaults* the SDK ships with.
 
 2. **Phase 1 checkpoint** (``outputs/phase1_best.pt``) — heads + fusion
@@ -51,11 +51,14 @@ import shutil
 import sys
 from pathlib import Path
 
-# HuggingFace model IDs whose local caches can be cleared
+# HuggingFace model IDs whose local caches can be cleared.
+# emotion2vec is stored in the FunASR / ModelScope cache (~/.cache/modelscope),
+# not in the HuggingFace hub cache — it is not listed here.
 _HF_MODEL_IDS: dict[str, str] = {
-    "VideoMAE (video backbone)": "MCG-NJU/videomae-base",
-    "ViViT (alternative video backbone)": "google/vivit-b-16x2-kinetics400",
-    "AST (audio backbone)": "MIT/ast-finetuned-audioset-10-10-0.4593",
+    "AffectNet ViT (video backbone, default)": "trpakov/vit-face-expression",
+    "VideoMAE (legacy video backbone)": "MCG-NJU/videomae-base",
+    "ViViT (legacy video backbone)": "google/vivit-b-16x2-kinetics400",
+    "AST (legacy audio backbone)": "MIT/ast-finetuned-audioset-10-10-0.4593",
 }
 
 # Checkpoint filenames produced by the training scripts
@@ -240,7 +243,7 @@ def main() -> None:
         print("      The SDK will revert to pretrained backbone + random heads.")
         print()
         print("  [2] Training checkpoints  +  HuggingFace backbone cache")
-        print("      Forces re-download of VideoMAE + AST weights (~1.8 GB) on next run.")
+        print("      Forces re-download of AffectNet ViT + emotion2vec on next run.")
         print()
 
         if not args.yes:
@@ -317,12 +320,17 @@ def main() -> None:
     print()
     print("  The SDK is now at factory state.")
     print("  On the next run it will use:")
-    print("    • VideoMAE pretrained on Kinetics-400 (if --pretrained)")
-    print("    • AST pretrained on AudioSet-10   (if --pretrained)")
+    print("    • AffectNet ViT pretrained on 450 K facial emotion images (if --pretrained)")
+    print("    • emotion2vec via FunASR                                  (if --pretrained)")
     print("    • Randomly-initialised fusion + emotion heads")
     print()
+    print("  Note: emotion2vec weights are cached separately by FunASR at")
+    print("    ~/.cache/modelscope/hub/iic/emotion2vec_base")
+    print("  To also clear the emotion2vec cache, delete that directory manually.")
+    print()
     print("  To start fresh training:")
-    print("    python training/train_phase1.py --data-dir /data/RAVDESS --pretrained")
+    print("    python training/train_phase1.py --data-dir /data/RAVDESS --pretrained \\")
+    print("        --class-weights 5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50")
     print("─" * 65)
     print()
 

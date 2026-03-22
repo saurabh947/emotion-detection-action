@@ -3,10 +3,41 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-# Default backbone choices — see models/backbones.py for full comparison table.
-_DEFAULT_VIDEO_MODEL: Literal["videomae", "vivit"] = "videomae"
-_DEFAULT_VIDEO_MODEL_NAME = "MCG-NJU/videomae-base"
-_DEFAULT_AUDIO_MODEL_NAME = "MIT/ast-finetuned-audioset-10-10-0.4593"
+# ---------------------------------------------------------------------------
+# Default backbone choices
+# ---------------------------------------------------------------------------
+
+# Video: AffectNet ViT — fine-tuned directly on AffectNet (450 K facial images,
+#   8-class emotion).  Best accuracy for real-world faces.
+_DEFAULT_VIDEO_MODEL: Literal["affectnet_vit", "videomae", "vivit"] = "affectnet_vit"
+_DEFAULT_VIDEO_MODEL_NAME = "trpakov/vit-face-expression"
+
+# Audio: emotion2vec — pre-trained on multi-dataset speech emotion data
+#   (IEMOCAP, MSP-Podcast, RAVDESS, CREMA-D).  Loaded via FunASR (required).
+_DEFAULT_AUDIO_MODEL: Literal["emotion2vec", "ast"] = "emotion2vec"
+_DEFAULT_AUDIO_MODEL_NAME = "iic/emotion2vec_base"
+
+# AffectNet class-imbalance correction weights (EMOTION_ORDER index order):
+#   ["angry", "disgusted", "fearful", "happy", "neutral", "sad", "surprised", "unclear"]
+#
+# Derived from AffectNet approximate distribution (# images):
+#   angry ~24 k, disgusted ~3.8 k, fearful ~6.8 k, happy ~134 k,
+#   neutral ~74 k, sad ~25 k, surprised ~14 k, unclear ~6 k (estimated)
+#
+# Formula: w_c = total / (num_classes * count_c), normalised so happy = 1.0
+#
+# These are passed directly to nn.CrossEntropyLoss(weight=...) — no custom
+# code required.  Override via Config.two_tower_emotion_class_weights.
+_DEFAULT_AFFECTNET_CLASS_WEIGHTS: list[float] = [
+    5.70,   # angry
+    35.50,  # disgusted
+    20.50,  # fearful
+    1.00,   # happy      ← most frequent; anchor weight = 1.0
+    1.90,   # neutral
+    5.50,   # sad
+    9.60,   # surprised
+    20.50,  # unclear
+]
 
 
 @dataclass
@@ -27,18 +58,40 @@ class Config:
     """Main configuration for the EmotionDetector SDK.
 
     The SDK uses a Two-Tower Multimodal Emotion Recognition Transformer as its
-    core model.  The video tower (VideoMAE) processes a rolling window of
-    frames; the audio tower (AST) processes the corresponding mel-spectrogram.
+    core model.  The video tower (AffectNet ViT by default) processes per-frame
+    face crops; the audio tower (emotion2vec by default) processes raw waveform.
     Bidirectional cross-attention fuses both modalities into a shared embedding
     from which two task heads decode:
-      - 8-class emotion probabilities (angry, disgusted, fearful, happy, neutral,
-        sad, surprised, unclear)
-      - 3 continuous attention metrics (stress, engagement, arousal)
 
-    The model runs out-of-the-box with stub (randomly-initialised) backbones
-    for architecture verification.  For production, set ``two_tower_pretrained``
-    to ``True`` so the VideoMAE and AST backbones are loaded from HuggingFace.
-    For fine-tuned weights, point ``two_tower_model_path`` to a saved checkpoint.
+    * 8-class emotion probabilities  (angry, disgusted, fearful, happy, neutral,
+      sad, surprised, unclear)
+    * 3 continuous attention metrics (stress, engagement, arousal)
+
+    Quick start::
+
+        # Best accuracy (AffectNet ViT + emotion2vec, requires funasr):
+        cfg = Config(two_tower_pretrained=True, two_tower_device="mps")
+
+        # Legacy (VideoMAE + AST, no extra deps):
+        cfg = Config(
+            two_tower_video_model="videomae",
+            two_tower_video_backbone="MCG-NJU/videomae-base",
+            two_tower_audio_model="ast",
+            two_tower_audio_backbone="MIT/ast-finetuned-audioset-10-10-0.4593",
+            two_tower_face_crop_enabled=False,
+        )
+
+    Class-imbalance correction
+    --------------------------
+    AffectNet is heavily skewed towards happy/neutral.  Set
+    ``two_tower_emotion_class_weights`` to a list of 8 floats (one per class in
+    EMOTION_ORDER) to enable weighted cross-entropy during training.  The
+    pre-computed AffectNet weights (``_DEFAULT_AFFECTNET_CLASS_WEIGHTS``) are
+    available as a reference — copy them into this field or pass
+    ``"affectnet"`` as a shorthand (resolved in ``__post_init__``).
+
+    No custom training code is needed — the weights are passed directly to
+    ``nn.CrossEntropyLoss(weight=...)``.
     """
 
     # ------------------------------------------------------------------ #
@@ -63,25 +116,28 @@ class Config:
     # ------------------------------------------------------------------ #
 
     # Video backbone selection.
-    #   "videomae"  → MCG-NJU/videomae-base  (RECOMMENDED — 16 frames, faster)
-    #   "vivit"     → google/vivit-b-16x2-kinetics400 (32 frames, higher latency)
-    # See models/backbones.py for the full comparison table.
-    two_tower_video_model: Literal["videomae", "vivit"] = _DEFAULT_VIDEO_MODEL
+    #   "affectnet_vit" → trpakov/vit-face-expression  (RECOMMENDED)
+    #   "videomae"      → MCG-NJU/videomae-base        (legacy, no face crop needed)
+    #   "vivit"         → google/vivit-b-16x2-kinetics400 (legacy, 32 frames)
+    two_tower_video_model: Literal["affectnet_vit", "videomae", "vivit"] = _DEFAULT_VIDEO_MODEL
 
-    # HuggingFace model IDs (override to use fine-tuned checkpoints).
+    # Audio backbone selection.
+    #   "emotion2vec"  → iic/emotion2vec_base  (RECOMMENDED — raw waveform input)
+    #   "ast"          → MIT/ast-finetuned-audioset-10-10-0.4593 (legacy, mel input)
+    two_tower_audio_model: Literal["emotion2vec", "ast"] = _DEFAULT_AUDIO_MODEL
+
+    # HuggingFace / FunASR model IDs (override to use fine-tuned checkpoints).
     two_tower_video_backbone: str = _DEFAULT_VIDEO_MODEL_NAME
     two_tower_audio_backbone: str = _DEFAULT_AUDIO_MODEL_NAME
 
-    # Load pretrained HuggingFace weights.
-    # Set False for offline testing / architecture verification only.
+    # Load pretrained weights.  Set False for offline testing / architecture
+    # verification only.
     two_tower_pretrained: bool = True
 
-    # Path to a fine-tuned NeuralFusionModel checkpoint (optional).
-    # When None the model runs with pretrained backbone weights and
-    # randomly-initialised cross-attention + heads (works before fine-tuning).
+    # Path to a fine-tuned NeuralFusionModel checkpoint (.pt / .pth).
     two_tower_model_path: str | None = None
 
-    # Torch device for inference.  Recommend "cuda" or "mps" in production.
+    # Torch device for the emotion model.  "mps" or "cuda" for production.
     two_tower_device: str = "cpu"
 
     # Shared projection / attention dimension.
@@ -93,14 +149,41 @@ class Config:
     # GRU layers in the temporal context buffer (2 recommended).
     two_tower_gru_layers: int = 2
 
-    # Frames per clip: 16 for VideoMAE, 32 for ViViT.
+    # Frames per clip: 16 for AffectNet ViT / VideoMAE, 32 for ViViT.
     two_tower_video_frames: int = 16
 
     # Number of early backbone encoder layers to freeze during fine-tuning.
-    two_tower_video_freeze_layers: int = 8
+    two_tower_video_freeze_layers: int = 6
     two_tower_audio_freeze_layers: int = 6
 
-    # Mel-spectrogram parameters for the audio tower.
+    # ------------------------------------------------------------------ #
+    # Face crop settings (AffectNet ViT only)                             #
+    # ------------------------------------------------------------------ #
+    # When True (default), MediaPipe detects the face in each frame and
+    # crops it before feeding to the ViT.  Ignored for VideoMAE / ViViT.
+    two_tower_face_crop_enabled: bool = True
+
+    # Fractional padding added on each side of the detected bounding box.
+    two_tower_face_crop_margin: float = 0.2
+
+    # Minimum MediaPipe face-detection confidence.  Frames below this
+    # threshold fall back to a centre crop.
+    two_tower_face_min_confidence: float = 0.5
+
+    # ------------------------------------------------------------------ #
+    # Class imbalance correction                                          #
+    # ------------------------------------------------------------------ #
+    # Per-class weights for nn.CrossEntropyLoss.  Length must equal
+    # len(EMOTION_ORDER) = 8.  Set to None to use unweighted loss.
+    #
+    # Pass the string "affectnet" to use the pre-computed inverse-frequency
+    # weights derived from the AffectNet dataset distribution (resolved in
+    # __post_init__ to the float list).
+    two_tower_emotion_class_weights: list[float] | None = None
+
+    # ------------------------------------------------------------------ #
+    # Mel-spectrogram parameters (AST legacy audio tower only)            #
+    # ------------------------------------------------------------------ #
     two_tower_n_mels: int = 128
     two_tower_n_fft: int = 400
     two_tower_hop_length: int = 160
@@ -129,9 +212,24 @@ class Config:
             raise ValueError("two_tower_video_freeze_layers must be >= 0")
         if self.two_tower_audio_freeze_layers < 0:
             raise ValueError("two_tower_audio_freeze_layers must be >= 0")
+        if not 0.0 <= self.two_tower_face_crop_margin <= 1.0:
+            raise ValueError("two_tower_face_crop_margin must be in [0, 1]")
+        if not 0.0 < self.two_tower_face_min_confidence <= 1.0:
+            raise ValueError("two_tower_face_min_confidence must be in (0, 1]")
+
         # Auto-set correct frame count for ViViT (needs 32 frames).
         if self.two_tower_video_model == "vivit" and self.two_tower_video_frames == 16:
             self.two_tower_video_frames = 32
+
+        # Validate / resolve class weights.
+        if isinstance(self.two_tower_emotion_class_weights, list):
+            if len(self.two_tower_emotion_class_weights) != 8:
+                raise ValueError(
+                    "two_tower_emotion_class_weights must have exactly 8 values "
+                    "(one per emotion class in EMOTION_ORDER)."
+                )
+            if any(w <= 0 for w in self.two_tower_emotion_class_weights):
+                raise ValueError("All class weights must be > 0.")
 
     def get_vla_config(self) -> ModelConfig:
         """Get configuration for the VLA model."""

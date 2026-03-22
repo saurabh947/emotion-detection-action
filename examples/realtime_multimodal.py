@@ -5,9 +5,9 @@ Architecture
 ------------
 The detector uses a Two-Tower Multimodal Emotion Recognition Transformer:
 
-    VideoMAE backbone  ──┐
-                          ├─► Cross-Attention Fusion ─► emotion probs (8)
-    AST backbone       ──┘                           └► attention metrics (3)
+    AffectNet ViT  ──┐  (per-frame face-cropped CLS tokens)
+                      ├─► VideoTemporalBlock ─► Cross-Attention Fusion ─► emotion probs (8)
+    emotion2vec    ──┘  (raw waveform via FunASR)                      └► attention metrics (3)
 
 Two display panels are shown:
 
@@ -30,8 +30,10 @@ Requirements
 ------------
 - Webcam
 - OpenCV for visualisation
-- PyTorch + torchaudio
-- HuggingFace ``transformers`` (for pretrained VideoMAE / AST backbones)
+- PyTorch
+- HuggingFace ``transformers`` (for AffectNet ViT backbone)
+- ``funasr`` + ``modelscope`` (for emotion2vec backbone)
+- ``mediapipe`` (for face detection / cropping, optional but recommended)
 """
 
 from __future__ import annotations

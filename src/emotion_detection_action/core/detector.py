@@ -1,14 +1,15 @@
 """Pure-neural, platform-agnostic EmotionDetector.
 
-The detector accepts raw numpy frames and numpy/tensor audio — no MediaPipe,
-no Silero VAD, no hardware-specific code.  The entire pipeline runs inside a
-single :class:`~models.fusion.NeuralFusionModel` that combines VideoMAE
-(video) and AST (audio) through bidirectional cross-attention and a GRU
-temporal context buffer.
+The detector accepts raw numpy frames and numpy/tensor audio — no Silero VAD,
+no hardware-specific code.  The entire pipeline runs inside a single
+:class:`~models.fusion.NeuralFusionModel` that combines AffectNet ViT (video)
+and emotion2vec (audio) through an intra-clip temporal self-attention block,
+bidirectional cross-attention, and a GRU temporal context buffer.
 
 Platform agnosticism
 --------------------
-* Inputs are plain ``numpy.ndarray`` (frames) and ``numpy.ndarray`` / ``torch.Tensor`` (audio).
+* Inputs are plain ``numpy.ndarray`` (frames) and ``numpy.ndarray`` /
+  ``torch.Tensor`` (audio).
 * The :class:`BaseActionHandler` interface is the only robot-facing dependency;
   users subclass it for their specific platform.
 * No GPIO, no ROS, no robot-SDK imports anywhere in this module.
@@ -38,18 +39,16 @@ from emotion_detection_action.actions.base import BaseActionHandler
 from emotion_detection_action.actions.logging_handler import LoggingActionHandler
 from emotion_detection_action.core.config import Config
 from emotion_detection_action.core.types import NeuralEmotionResult
-from emotion_detection_action.models.backbones import BackboneConfig
+from emotion_detection_action.models.backbones import BackboneConfig, FaceCropPipeline
 from emotion_detection_action.models.fusion import NeuralFusionModel
 
-try:
-    import torchaudio.transforms as _T
-
-    _TORCHAUDIO_AVAILABLE = True
-except ImportError:
-    _TORCHAUDIO_AVAILABLE = False
-
-# Target spatial resolution expected by VideoMAE and ViViT.
+# Target spatial resolution expected by ViT-based backbones (AffectNet ViT,
+# VideoMAE, ViViT).
 _VIDEO_FRAME_SIZE: int = 224
+
+# Maximum raw waveform duration fed to the audio backbone (seconds).
+# emotion2vec operates efficiently on 2–3 s chunks at 16 kHz.
+_MAX_AUDIO_SECONDS: int = 3
 
 
 class EmotionDetector:
@@ -58,7 +57,10 @@ class EmotionDetector:
     Wraps a :class:`~models.fusion.NeuralFusionModel` and handles:
 
     * Rolling frame buffer (clips sent to the video backbone)
-    * Raw PCM → log mel-spectrogram conversion (torchaudio)
+    * Face cropping per-frame via MediaPipe (**AffectNet ViT** mode)
+    * Raw PCM → backbone-ready tensor conversion
+      - emotion2vec (default): ``(1, samples)`` raw waveform
+      - AST (legacy): ``(1, time, mel)`` log mel-spectrogram
     * Temporal GRU state management
     * Quantization for deployment
     * A :class:`~actions.base.BaseActionHandler` integration point
@@ -98,6 +100,7 @@ class EmotionDetector:
 
         self._model: NeuralFusionModel | None = None
         self._mel_transform: object | None = None
+        self._face_cropper: FaceCropPipeline | None = None
 
         # Frame buffer: (T, H, W, 3) RGB numpy arrays
         self._frame_buffer: deque[np.ndarray] = deque(
@@ -122,7 +125,7 @@ class EmotionDetector:
         return self._is_quantized
 
     def initialize(self) -> None:
-        """Load backbone weights and prepare the mel-spectrogram transform.
+        """Load backbone weights and prepare audio / face-crop pipelines.
 
         Calling this explicitly is optional — ``process`` and ``process_frame``
         call it lazily on the first invocation.
@@ -136,9 +139,13 @@ class EmotionDetector:
             video_model=cfg.two_tower_video_model,
             video_model_name=cfg.two_tower_video_backbone,
             video_num_frames=cfg.two_tower_video_frames,
+            video_freeze_layers=cfg.two_tower_video_freeze_layers,
+            face_crop_enabled=cfg.two_tower_face_crop_enabled,
+            face_crop_margin=cfg.two_tower_face_crop_margin,
+            face_min_confidence=cfg.two_tower_face_min_confidence,
+            audio_model=cfg.two_tower_audio_model,
             audio_model_name=cfg.two_tower_audio_backbone,
             audio_freeze_layers=cfg.two_tower_audio_freeze_layers,
-            video_freeze_layers=cfg.two_tower_video_freeze_layers,
             pretrained=cfg.two_tower_pretrained,
             d_model=cfg.two_tower_d_model,
         )
@@ -152,6 +159,7 @@ class EmotionDetector:
 
         if cfg.two_tower_model_path:
             import pathlib
+
             ckpt_path = pathlib.Path(cfg.two_tower_model_path).resolve()
             if not ckpt_path.is_file():
                 raise FileNotFoundError(
@@ -166,21 +174,25 @@ class EmotionDetector:
                 map_location=cfg.two_tower_device,
                 weights_only=True,
             )
-            # Checkpoints saved by training/common.py are dicts with a
-            # "model_state" key.  Plain state dicts are also accepted.
-            state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
-            # Remap keys from older checkpoint naming conventions.
+            state = (
+                payload["model_state"]
+                if isinstance(payload, dict) and "model_state" in payload
+                else payload
+            )
             _RENAMES = {
                 "absent_video_token": "absent_video",
                 "absent_audio_token": "absent_audio",
             }
             state = {_RENAMES.get(k, k): v for k, v in state.items()}
             missing, unexpected = self._model.load_state_dict(state, strict=False)
-            # Missing absent_* tokens are re-initialised from scratch — harmless.
-            # Any other missing keys indicate a genuine architecture mismatch.
-            real_missing = [k for k in missing if not k.startswith(("absent_video", "absent_audio"))]
+            real_missing = [
+                k
+                for k in missing
+                if not k.startswith(("absent_video", "absent_audio", "video_temporal"))
+            ]
             if real_missing:
                 import warnings
+
                 warnings.warn(
                     f"Checkpoint {ckpt_path.name} is missing {len(real_missing)} key(s) "
                     f"that will use random initialisation: {real_missing[:5]}"
@@ -197,23 +209,46 @@ class EmotionDetector:
         self._model.to(cfg.two_tower_device)
         self._model.eval()
 
-        if _TORCHAUDIO_AVAILABLE:
-            self._mel_transform = _T.MelSpectrogram(
-                sample_rate=cfg.sample_rate,
-                n_mels=cfg.two_tower_n_mels,
-                n_fft=cfg.two_tower_n_fft,
-                hop_length=cfg.two_tower_hop_length,
-                power=2.0,
+        # Face crop pipeline — only used for AffectNet ViT.
+        if (
+            cfg.two_tower_video_model == "affectnet_vit"
+            and cfg.two_tower_face_crop_enabled
+        ):
+            self._face_cropper = FaceCropPipeline(
+                margin=cfg.two_tower_face_crop_margin,
+                min_confidence=cfg.two_tower_face_min_confidence,
+                image_size=_VIDEO_FRAME_SIZE,
             )
-        elif cfg.verbose:
-            print("torchaudio not available — audio tower will use zero tensors.")
+
+        # Legacy AST mel-spectrogram transform.
+        if cfg.two_tower_audio_model == "ast":
+            try:
+                import torchaudio.transforms as _T  # type: ignore[import]
+
+                self._mel_transform = _T.MelSpectrogram(
+                    sample_rate=cfg.sample_rate,
+                    n_mels=cfg.two_tower_n_mels,
+                    n_fft=cfg.two_tower_n_fft,
+                    hop_length=cfg.two_tower_hop_length,
+                    power=2.0,
+                )
+            except ImportError:
+                if cfg.verbose:
+                    print("torchaudio not available — AST audio tower disabled.")
 
         self.action_handler.connect()
         self._initialized = True
 
         if cfg.verbose:
             n = self._model.count_parameters()
-            print(f"NeuralFusionModel ready ({n:,} trainable params) on {cfg.two_tower_device}")
+            device_info = cfg.two_tower_device
+            audio_info = f"{cfg.two_tower_audio_model} ({cfg.two_tower_audio_backbone})"
+            video_info = f"{cfg.two_tower_video_model} ({cfg.two_tower_video_backbone})"
+            print(
+                f"NeuralFusionModel ready ({n:,} trainable params) on {device_info}\n"
+                f"  video : {video_info}  face_crop={cfg.two_tower_face_crop_enabled}\n"
+                f"  audio : {audio_info}"
+            )
 
     def shutdown(self) -> None:
         """Release resources and reset buffers."""
@@ -221,6 +256,7 @@ class EmotionDetector:
         self._audio_buffer.clear()
         if self._model is not None:
             self._model.reset_temporal_state()
+        self._face_cropper = None
         self.action_handler.disconnect()
         self._initialized = False
 
@@ -263,8 +299,8 @@ class EmotionDetector:
 
         Args:
             frames: ``(T, H, W, 3)`` uint8 or float32 RGB numpy array.
-                Any spatial resolution is accepted — frames are resized to
-                224×224 internally.
+                Any spatial resolution is accepted — frames are resized
+                (and face-cropped if enabled) internally.
             audio: Raw PCM samples (float32, mono) as a numpy array or
                 torch.Tensor.  Pass ``None`` for video-only mode.
             timestamp: Clip timestamp in seconds.  Defaults to ``time.time()``.
@@ -278,8 +314,8 @@ class EmotionDetector:
         ts = timestamp if timestamp is not None else time.time()
         assert self._model is not None
 
-        video_tensor = self._frames_to_tensor(frames)        # (1, T, 3, 224, 224)
-        audio_tensor = self._audio_to_tensor(audio)          # (1, time, mel) or None
+        video_tensor = self._frames_to_tensor(frames)   # (1, T, 3, 224, 224)
+        audio_tensor = self._audio_to_tensor(audio)     # (1, samples) or (1, time, mel) or None
         device = self.config.two_tower_device
         video_tensor = video_tensor.to(device)
         if audio_tensor is not None:
@@ -318,9 +354,7 @@ class EmotionDetector:
 
         ts = timestamp if timestamp is not None else time.time()
 
-        # Convert BGR → RGB. This method expects BGR frames (standard OpenCV
-        # output).  If your source already delivers RGB frames, call process()
-        # directly to avoid a double conversion.
+        # Convert BGR → RGB.
         rgb = frame[..., ::-1].copy() if frame.ndim == 3 and frame.shape[2] == 3 else frame
         self._frame_buffer.append(rgb)
 
@@ -329,14 +363,10 @@ class EmotionDetector:
 
         frames_arr = np.stack(list(self._frame_buffer), axis=0)  # (T, H, W, 3)
 
-        # Concatenate all buffered audio then trim to the last 3 seconds of
-        # *samples* (not chunks).  Also prune old chunks from the buffer so
-        # memory stays bounded.
         if self._audio_buffer:
             full_audio = np.concatenate(list(self._audio_buffer), axis=0)
-            max_samples = self.config.sample_rate * 3
+            max_samples = self.config.sample_rate * _MAX_AUDIO_SECONDS
             audio_arr: np.ndarray | None = full_audio[-max_samples:]
-            # Keep only chunks that contribute to the retained window.
             if len(full_audio) > max_samples:
                 self._audio_buffer.clear()
                 self._audio_buffer.append(audio_arr)
@@ -405,14 +435,19 @@ class EmotionDetector:
 
         * Handles both uint8 [0, 255] and float32 [0, 1] inputs.
         * Repeat-pads at the start if fewer than ``two_tower_video_frames`` frames
-          are provided (preserves the most recent frames on the right).
-        * Resizes to 224×224 via bilinear interpolation.
+          are provided.
+        * When ``two_tower_video_model == "affectnet_vit"`` and face crop is
+          enabled, each frame is first cropped around the detected face using
+          :class:`~models.backbones.FaceCropPipeline`, then resized to 224×224.
+          VideoMAE / ViViT receive a standard bilinear resize instead.
         """
+        import cv2  # type: ignore[import]
+
         target_t = self.config.two_tower_video_frames
 
-        # Normalise to float32 [0, 1]
-        if frames.dtype == np.uint8:
-            frames = frames.astype(np.float32) / 255.0
+        # Normalise to uint8 for face cropping
+        if frames.dtype != np.uint8:
+            frames = (frames * 255).clip(0, 255).astype(np.uint8)
 
         # Repeat-pad along the time axis if needed
         T = frames.shape[0]
@@ -422,30 +457,41 @@ class EmotionDetector:
         elif T > target_t:
             frames = frames[-target_t:]
 
-        # (T, H, W, 3) → (T, 3, H, W)
-        t = torch.from_numpy(frames).permute(0, 3, 1, 2).float()
+        use_face_crop = (
+            self.config.two_tower_video_model == "affectnet_vit"
+            and self._face_cropper is not None
+        )
 
-        # Resize spatial dims if needed
-        H, W = t.shape[-2:]
-        if (H, W) != (_VIDEO_FRAME_SIZE, _VIDEO_FRAME_SIZE):
-            t = F.interpolate(
-                t,
-                size=(_VIDEO_FRAME_SIZE, _VIDEO_FRAME_SIZE),
-                mode="bilinear",
-                align_corners=False,
-            )
+        processed: list[np.ndarray] = []
+        for frame in frames:
+            if use_face_crop:
+                # Crop face, resize to 224×224
+                cropped = self._face_cropper.crop(frame)  # type: ignore[union-attr]
+            else:
+                cropped = cv2.resize(frame, (_VIDEO_FRAME_SIZE, _VIDEO_FRAME_SIZE))
+            processed.append(cropped)
 
+        # Stack → (T, H, W, 3) uint8
+        stacked = np.stack(processed, axis=0)
+        # (T, H, W, 3) → (T, 3, H, W) float32 [0, 1]
+        t = torch.from_numpy(stacked).permute(0, 3, 1, 2).float() / 255.0
         return t.unsqueeze(0)  # (1, T, 3, 224, 224)
 
     def _audio_to_tensor(
         self,
         audio: np.ndarray | torch.Tensor | None,
     ) -> torch.Tensor | None:
-        """Convert raw PCM audio → ``(1, time_steps, mel_bins)`` tensor.
+        """Convert raw PCM audio to backbone-ready tensor.
 
-        Returns ``None`` if ``audio`` is ``None`` or torchaudio is unavailable.
+        * **emotion2vec** (default): returns ``(1, samples)`` raw float32
+          waveform.  No transformation is needed — the backbone processes raw
+          waveform directly.
+        * **AST** (legacy): returns ``(1, time_steps, mel_bins)`` log
+          mel-spectrogram via torchaudio.
+
+        Returns ``None`` if ``audio`` is ``None``.
         """
-        if audio is None or self._mel_transform is None:
+        if audio is None:
             return None
 
         if isinstance(audio, np.ndarray):
@@ -454,10 +500,17 @@ class EmotionDetector:
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)  # (1, samples)
 
-        mel = self._mel_transform(audio)             # (1, mel, time)
-        mel = torch.log1p(mel)                       # log-compression
-        mel = mel.squeeze(0).transpose(0, 1)         # (time, mel)
-        return mel.unsqueeze(0)                      # (1, time, mel)
+        if self.config.two_tower_audio_model == "ast":
+            # Legacy AST path — need mel-spectrogram
+            if self._mel_transform is None:
+                return None
+            mel = self._mel_transform(audio)          # (1, mel, time)
+            mel = torch.log1p(mel)
+            mel = mel.squeeze(0).transpose(0, 1)      # (time, mel)
+            return mel.unsqueeze(0)                   # (1, time, mel)
+
+        # emotion2vec — return raw waveform (1, samples)
+        return audio  # already (1, samples)
 
     # ------------------------------------------------------------------ #
     # Result construction                                                  #
@@ -465,7 +518,7 @@ class EmotionDetector:
 
     @staticmethod
     def _build_result(
-        out: "NeuralModelOutput",
+        out: "NeuralModelOutput",  # noqa: F821
         timestamp: float,
     ) -> NeuralEmotionResult:
         from emotion_detection_action.models.fusion import NeuralFusionModel, NeuralModelOutput  # noqa: F401
@@ -504,4 +557,13 @@ class EmotionDetector:
     def __repr__(self) -> str:
         status = "initialized" if self._initialized else "not initialized"
         q = " [quantized]" if self._is_quantized else ""
-        return f"EmotionDetector({status}{q}, video={self.config.two_tower_video_model!r})"
+        crop = (
+            f" face_crop={self.config.two_tower_face_crop_enabled}"
+            if self.config.two_tower_video_model == "affectnet_vit"
+            else ""
+        )
+        return (
+            f"EmotionDetector({status}{q}, "
+            f"video={self.config.two_tower_video_model!r}{crop}, "
+            f"audio={self.config.two_tower_audio_model!r})"
+        )
