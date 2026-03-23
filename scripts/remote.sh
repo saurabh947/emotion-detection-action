@@ -67,6 +67,9 @@ source "$ENV_FILE"
 : "${TRAIN_NUM_WORKERS:=4}"
 : "${TRAIN_EPOCHS_PHASE1:=20}"
 : "${TRAIN_EPOCHS_PHASE2:=10}"
+: "${TRAIN_VIDEO_MODEL:=affectnet_vit}"
+: "${TRAIN_AUDIO_MODEL:=emotion2vec}"
+: "${TRAIN_AUGMENT:=true}"
 : "${LOCAL_DATA_DIR:=./data/combined}"
 : "${SKIP_DATA_SYNC:=false}"
 
@@ -362,6 +365,10 @@ cmd_train_phase1() {
     echo "  Batch/GPU: $TRAIN_BATCH_SIZE | Epochs: $TRAIN_EPOCHS_PHASE1"
     echo ""
 
+    # Build optional augment flag
+    local augment_flag=""
+    [[ "$TRAIN_AUGMENT" == "true" ]] && augment_flag="--augment"
+
     ssh_interactive "
         cd $REMOTE_DIR && \
         source venv/bin/activate && \
@@ -370,7 +377,9 @@ cmd_train_phase1() {
         $launcher training/train_phase1.py \
             --data-dir data/combined \
             --pretrained \
-            --augment \
+            --video-model $TRAIN_VIDEO_MODEL \
+            --audio-model $TRAIN_AUDIO_MODEL \
+            $augment_flag \
             --batch-size $TRAIN_BATCH_SIZE \
             --num-workers $TRAIN_NUM_WORKERS \
             --epochs $TRAIN_EPOCHS_PHASE1 \
@@ -403,6 +412,8 @@ cmd_train_phase2() {
             --checkpoint outputs/phase1_best.pt \
             --data-dir data/combined \
             --pretrained \
+            --video-model $TRAIN_VIDEO_MODEL \
+            --audio-model $TRAIN_AUDIO_MODEL \
             --batch-size $TRAIN_BATCH_SIZE \
             --num-workers $TRAIN_NUM_WORKERS \
             --epochs $TRAIN_EPOCHS_PHASE2 \

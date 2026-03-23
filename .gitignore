@@ -69,6 +69,7 @@ compute.env
 .idea/
 .vscode/
 .cursor/
+.claude/
 *.swp
 *.swo
 *~
