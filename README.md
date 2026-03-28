@@ -77,6 +77,36 @@ directly into VLA models (e.g., OpenVLA) as the emotion context.
 
 ---
 
+## Layer breakdown
+
+| Component | Layers | What they do |
+|---|---|---|
+| **Video Tower** — AffectNet ViT-B/16 | 12 transformer encoder layers | Processes each face-cropped frame independently → one 768-dim CLS token per frame |
+| **Audio Tower** — emotion2vec (data2vec-base) | 12 transformer encoder layers | Extracts speech emotion features → 768-dim frame tokens; **always frozen** (FunASR, no gradient exposed) |
+| **Video projection** | 1 (Linear + LayerNorm) | Maps ViT 768-dim output → shared 512-dim embedding space |
+| **Audio projection** | 1 (Linear + LayerNorm) | Maps emotion2vec 768-dim output → shared 512-dim embedding space |
+| **VideoTemporalBlock** | 1 (pos-embed + MHA + LayerNorm) | Injects frame-order positional encoding; lets video frame tokens attend to each other before cross-modal fusion |
+| **CrossAttentionBlock × 2** | 2 (each: 2 MHA + 2 FFN + 4 LayerNorm) | Bidirectional video ↔ audio cross-attention — each tower queries the other |
+| **TemporalContextBuffer** | 1 (2-layer GRU) | 2-second inter-clip rolling memory; hidden state persists across clips during live inference |
+| **Emotion head** | 1 (Linear → softmax) | 512-dim fused vector → 8-class emotion probabilities |
+| **Metrics head** | 1 (2× Linear + GELU + Sigmoid) | 512-dim fused vector → stress, engagement, arousal |
+| **Total** | **32** | 24 pretrained backbone layers + 8 custom fusion/head layers |
+
+### Frozen vs. trainable per phase
+
+| | Phase 1 | Phase 2 |
+|---|---|---|
+| **Video ViT layers 0–7** (bottom 2/3) | Frozen | Frozen |
+| **Video ViT layers 8–11** (top 1/3) | Frozen | **Trainable** (`lr=1e-5`) |
+| **Audio emotion2vec** (all 12 layers) | Frozen | Frozen |
+| **Projections, VideoTemporalBlock, CrossAttentionBlocks, GRU, heads** | **Trainable** (`lr=1e-4`) | **Trainable** (`lr=1e-4`) |
+| **Trainable / Total** | **8 / 32** | **12 / 32** |
+| **Frozen / Total** | **24 / 32** | **20 / 32** |
+
+> Phase 2 defaults to unfreezing the top 4 ViT layers (`--unfreeze-layers 4`). Pass `--unfreeze-layers 6` for larger datasets.
+
+---
+
 ## Backbone selection
 
 ### Video — AffectNet ViT (default, recommended)
