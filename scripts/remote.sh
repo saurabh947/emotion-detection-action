@@ -64,12 +64,19 @@ source "$ENV_FILE"
 : "${COMPUTE_DEVICE:=cuda}"
 : "${TRAIN_NUM_GPUS:=8}"
 : "${TRAIN_BATCH_SIZE:=16}"
+: "${TRAIN_BATCH_SIZE_PHASE2:=8}"
 : "${TRAIN_NUM_WORKERS:=4}"
 : "${TRAIN_EPOCHS_PHASE1:=20}"
 : "${TRAIN_EPOCHS_PHASE2:=10}"
 : "${TRAIN_VIDEO_MODEL:=affectnet_vit}"
 : "${TRAIN_AUDIO_MODEL:=emotion2vec}"
+: "${TRAIN_UNFREEZE_LAYERS:=4}"
 : "${TRAIN_AUGMENT:=true}"
+: "${TRAIN_LR_PHASE1:=2e-4}"
+: "${TRAIN_SCALE_LR:=false}"
+: "${TRAIN_WARMUP_EPOCHS:=2}"
+: "${TRAIN_WEIGHT_DECAY:=1e-3}"
+: "${TRAIN_CLASS_WEIGHTS:=5.70,35.50,20.50,1.00,1.90,5.50,9.60,20.50}"
 : "${LOCAL_DATA_DIR:=./data/combined}"
 : "${SKIP_DATA_SYNC:=false}"
 
@@ -365,14 +372,21 @@ cmd_train_phase1() {
     echo "  Batch/GPU: $TRAIN_BATCH_SIZE | Epochs: $TRAIN_EPOCHS_PHASE1"
     echo ""
 
-    # Build optional augment flag
+    # Build optional flags
     local augment_flag=""
     [[ "$TRAIN_AUGMENT" == "true" ]] && augment_flag="--augment"
+
+    local scale_lr_flag="--no-scale-lr"
+    [[ "$TRAIN_SCALE_LR" == "true" ]] && scale_lr_flag="--scale-lr"
+
+    local class_weights_flag=""
+    [[ -n "$TRAIN_CLASS_WEIGHTS" ]] && class_weights_flag="--class-weights $TRAIN_CLASS_WEIGHTS"
 
     ssh_interactive "
         cd $REMOTE_DIR && \
         source venv/bin/activate && \
         mkdir -p outputs && \
+        export HF_TOKEN='${HF_TOKEN:-}' && \
         TORCHELASTIC_ERROR_FILE=/tmp/torchrun_phase1_err.json \
         $launcher training/train_phase1.py \
             --data-dir data/combined \
@@ -380,6 +394,11 @@ cmd_train_phase1() {
             --video-model $TRAIN_VIDEO_MODEL \
             --audio-model $TRAIN_AUDIO_MODEL \
             $augment_flag \
+            $scale_lr_flag \
+            $class_weights_flag \
+            --lr $TRAIN_LR_PHASE1 \
+            --warmup-epochs $TRAIN_WARMUP_EPOCHS \
+            --weight-decay $TRAIN_WEIGHT_DECAY \
             --batch-size $TRAIN_BATCH_SIZE \
             --num-workers $TRAIN_NUM_WORKERS \
             --epochs $TRAIN_EPOCHS_PHASE1 \
@@ -400,13 +419,24 @@ cmd_train_phase2() {
 
     echo "  Starting Phase 2 training …"
     echo "  GPUs: $TRAIN_NUM_GPUS | Launcher: $launcher"
-    echo "  Batch/GPU: $TRAIN_BATCH_SIZE | Epochs: $TRAIN_EPOCHS_PHASE2"
+    echo "  Batch/GPU: $TRAIN_BATCH_SIZE_PHASE2 | Epochs: $TRAIN_EPOCHS_PHASE2 | Unfreeze layers: $TRAIN_UNFREEZE_LAYERS"
     echo ""
+
+    # Build optional flags
+    local scale_lr_flag="--no-scale-lr"
+    [[ "$TRAIN_SCALE_LR" == "true" ]] && scale_lr_flag="--scale-lr"
+
+    local augment_flag=""
+    [[ "$TRAIN_AUGMENT" == "true" ]] && augment_flag="--augment"
+
+    local class_weights_flag=""
+    [[ -n "$TRAIN_CLASS_WEIGHTS" ]] && class_weights_flag="--class-weights $TRAIN_CLASS_WEIGHTS"
 
     ssh_interactive "
         cd $REMOTE_DIR && \
         source venv/bin/activate && \
         mkdir -p outputs && \
+        export HF_TOKEN='${HF_TOKEN:-}' && \
         TORCHELASTIC_ERROR_FILE=/tmp/torchrun_phase2_err.json \
         $launcher training/train_phase2.py \
             --checkpoint outputs/phase1_best.pt \
@@ -414,7 +444,13 @@ cmd_train_phase2() {
             --pretrained \
             --video-model $TRAIN_VIDEO_MODEL \
             --audio-model $TRAIN_AUDIO_MODEL \
-            --batch-size $TRAIN_BATCH_SIZE \
+            --unfreeze-layers $TRAIN_UNFREEZE_LAYERS \
+            $scale_lr_flag \
+            $augment_flag \
+            $class_weights_flag \
+            --warmup-epochs $TRAIN_WARMUP_EPOCHS \
+            --weight-decay $TRAIN_WEIGHT_DECAY \
+            --batch-size $TRAIN_BATCH_SIZE_PHASE2 \
             --num-workers $TRAIN_NUM_WORKERS \
             --epochs $TRAIN_EPOCHS_PHASE2 \
             --output-dir outputs \

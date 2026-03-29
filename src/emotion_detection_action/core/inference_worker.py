@@ -225,6 +225,7 @@ class InferenceWorker:
 
         self._running = False
         self._threads: list[threading.Thread] = []
+        self._fatal_error: BaseException | None = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -329,6 +330,13 @@ class InferenceWorker:
             return self._latest_result
 
     @property
+    def fatal_error(self) -> BaseException | None:
+        """Set when a worker thread has encountered an unrecoverable error
+        (e.g. CUDA OOM) and shut itself down.  Poll this from the main thread
+        if you need to detect and restart the worker."""
+        return self._fatal_error
+
+    @property
     def stats(self) -> WorkerStats:
         """Snapshot of performance counters (safe to call from any thread)."""
         with self._stats_lock:
@@ -402,9 +410,25 @@ class InferenceWorker:
                     timestamp=packet.timestamp,
                 )
             except Exception as exc:
-                # Never let a bad frame crash the worker thread, but log it.
                 import logging
-                logging.getLogger(__name__).warning(
+                _log = logging.getLogger(__name__)
+                # Treat CUDA/OOM errors as unrecoverable — stop this thread and
+                # surface the error so the main thread can detect and restart.
+                _msg = str(exc).lower()
+                _is_fatal = isinstance(exc, MemoryError) or (
+                    isinstance(exc, RuntimeError)
+                    and ("cuda" in _msg or "out of memory" in _msg)
+                )
+                if _is_fatal:
+                    _log.error(
+                        "InferenceWorker [%s]: unrecoverable error, shutting down thread. %s",
+                        threading.current_thread().name, exc,
+                        exc_info=True,
+                    )
+                    self._fatal_error = exc
+                    self._running = False
+                    break
+                _log.warning(
                     "InferenceWorker: frame dropped due to inference error: %s", exc,
                     exc_info=True,
                 )

@@ -536,7 +536,15 @@ def main() -> None:
 
         # ── Validation and logging — rank 0 only ──────────────────────────
         if is_main:
-            val_loss, val_acc = compute_epoch_metrics(raw_model, val_loader, criterion, device)
+            try:
+                val_loss, val_acc = compute_epoch_metrics(raw_model, val_loader, criterion, device)
+            except Exception as _val_exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Epoch %d: validation failed, skipping best-checkpoint update. %s",
+                    epoch, _val_exc, exc_info=True,
+                )
+                val_loss, val_acc = float("nan"), float("nan")
 
             current_lr = optimizer.param_groups[0]["lr"]
             elapsed    = time.perf_counter() - epoch_t0

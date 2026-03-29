@@ -710,7 +710,15 @@ def load_checkpoint(
     ckpt = torch.load(path, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     if optimizer is not None and "optimizer_state" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+        except (ValueError, KeyError) as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "load_checkpoint: optimizer state is incompatible with the current "
+                "optimizer (likely a Phase 1 → Phase 2 transition with different param "
+                "groups). Starting with a fresh optimizer state. Reason: %s", exc,
+            )
     return ckpt
 
 

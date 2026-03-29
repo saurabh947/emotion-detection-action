@@ -335,14 +335,20 @@ class EmotionDetector:
         """Accumulate one BGR frame into the rolling buffer and run inference.
 
         Accepts a **single** BGR frame (as OpenCV produces) and accumulates it
-        into the internal rolling buffer.  Inference runs every time the buffer
-        is primed (from the first call onward, with repeat-padding for early
-        frames).
+        into the internal rolling buffer.  Inference runs on every call.
+
+        **Warm-up period:** Until the buffer holds ``config.two_tower_video_frames``
+        frames (default 16), the model sees repeat-padded copies of the earliest
+        frame prepended to the clip.  Predictions during this warm-up period are
+        less reliable — treat any result produced before at least 16 frames have
+        been submitted as indicative only.  Call :meth:`reset` when switching
+        subjects to restart the warm-up.
 
         Args:
-            frame: ``(H, W, 3)`` BGR or RGB uint8 frame from a camera.
-                BGR frames are converted to RGB automatically.
-            audio: Optional raw PCM audio chunk (float32, mono).
+            frame: ``(H, W, 3)`` BGR uint8 frame from a camera.
+                BGR is converted to RGB automatically.  Grayscale or already-RGB
+                frames must be explicitly converted before passing.
+            audio: Optional raw PCM audio chunk (float32, mono, 16 kHz).
             timestamp: Frame timestamp.  Defaults to ``time.time()``.
 
         Returns:

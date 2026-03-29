@@ -75,6 +75,15 @@ NeuralEmotionResult(
 The `latent_embedding` is a 512-dim GRU-smoothed fused vector — feed this
 directly into VLA models (e.g., OpenVLA) as the emotion context.
 
+### Missing-modality handling
+
+| Scenario | Behaviour |
+|---|---|
+| Both modalities | Full cross-attention fusion |
+| `video_frames=None` | Learned absent-video token substituted |
+| `audio=None` | Learned absent-audio token substituted |
+| Both `None` | `ValueError` raised |
+
 ---
 
 ## Layer breakdown
@@ -104,58 +113,6 @@ directly into VLA models (e.g., OpenVLA) as the emotion context.
 | **Frozen / Total** | **24 / 32** | **20 / 32** |
 
 > Phase 2 defaults to unfreezing the top 4 ViT layers (`--unfreeze-layers 4`). Pass `--unfreeze-layers 6` for larger datasets.
-
----
-
-## Backbone selection
-
-### Video — AffectNet ViT (default, recommended)
-
-| Property | **AffectNet ViT** ✓ default | VideoMAE (legacy) | ViViT (legacy) |
-|---|---|---|---|
-| HuggingFace ID | `trpakov/vit-face-expression` | `MCG-NJU/videomae-base` | `google/vivit-b-16x2-kinetics400` |
-| Pre-training task | **Emotion classification** on 450 K faces | Masked autoencoding | Action recognition |
-| Input | Per-frame face crops (auto-applied) | 16-frame clip | 32-frame clip |
-| Output | `(B, T, 768)` — 1 CLS per frame | `(B, ~1568, 768)` patch tokens | `(B, ~3137, 768)` |
-| Domain fit | **Direct** — trained on emotion | Indirect | Indirect |
-| Requires face crop | Yes (MediaPipe, automatic) | No | No |
-
-### Audio — emotion2vec (default, recommended)
-
-| Property | **emotion2vec** ✓ default | AST (legacy) |
-|---|---|---|
-| Loader | FunASR (required: `funasr`, `modelscope`) | HuggingFace transformers |
-| Pre-training task | **Speech emotion** (IEMOCAP, MSP, RAVDESS, CREMA-D) | AudioSet sound classification |
-| Input | `(B, samples)` raw 16 kHz waveform | `(B, time, mel)` mel-spectrogram |
-| Output | `(B, T_a, 768)` frame features | `(B, T_a, 768)` CLS + patch tokens |
-
-emotion2vec is a **required** dependency. `funasr` and `modelscope` are installed
-automatically with the SDK — no extra steps needed.
-
----
-
-## Code structure
-
-```
-src/emotion_detection_action/
-├── models/
-│   ├── backbones.py        ← VideoBackbone (AffectNet ViT/VideoMAE/ViViT)
-│   │                          AudioBackbone (emotion2vec/AST)
-│   │                          FaceCropPipeline (MediaPipe face detection)
-│   ├── fusion.py           ← NeuralFusionModel · VideoTemporalBlock
-│   │                          CrossAttentionBlock · TemporalContextBuffer
-│   └── vla/                ← OpenVLA integration (optional)
-├── core/
-│   ├── detector.py         ← EmotionDetector (pure-neural, platform-agnostic)
-│   ├── inference_worker.py ← InferenceWorker · WorkerStats (background thread + queue)
-│   ├── config.py           ← Config dataclass
-│   └── types.py            ← NeuralEmotionResult (Pydantic) · ActionCommand · EmotionLabel
-├── actions/
-│   └── base.py             ← BaseActionHandler (subclass for your robot)
-└── inputs/
-    ├── video.py            ← Camera capture helper
-    └── audio.py            ← Microphone capture helper
-```
 
 ---
 
@@ -256,6 +213,37 @@ detector = EmotionDetector(Config(...), action_handler=ReachyHandler())
 
 ---
 
+## Backbone selection
+
+The default video backbone is `trpakov/vit-face-expression` (AffectNet ViT-B/16), pre-trained directly on 450K emotion-labelled faces — `VideoMAE` (`MCG-NJU/videomae-base`) and `ViViT` (`google/vivit-b-16x2-kinetics400`) are supported as legacy drop-in swaps via `two_tower_video_model`. The default audio backbone is `iic/emotion2vec_base` (loaded via FunASR), pre-trained on speech emotion corpora (IEMOCAP, MSP-Podcast, RAVDESS, CREMA-D) — the legacy `AST` (`MIT/ast-finetuned-audioset-10-10-0.4593`) can be swapped in via `two_tower_audio_model="ast"`. Note that emotion2vec is always frozen regardless of phase, as FunASR does not expose gradient flow.
+
+---
+
+## Code structure
+
+```
+src/emotion_detection_action/
+├── models/
+│   ├── backbones.py        ← VideoBackbone (AffectNet ViT/VideoMAE/ViViT)
+│   │                          AudioBackbone (emotion2vec/AST)
+│   │                          FaceCropPipeline (MediaPipe face detection)
+│   ├── fusion.py           ← NeuralFusionModel · VideoTemporalBlock
+│   │                          CrossAttentionBlock · TemporalContextBuffer
+│   └── vla/                ← OpenVLA integration (optional)
+├── core/
+│   ├── detector.py         ← EmotionDetector (pure-neural, platform-agnostic)
+│   ├── inference_worker.py ← InferenceWorker · WorkerStats (background thread + queue)
+│   ├── config.py           ← Config dataclass
+│   └── types.py            ← NeuralEmotionResult (Pydantic) · ActionCommand · EmotionLabel
+├── actions/
+│   └── base.py             ← BaseActionHandler (subclass for your robot)
+└── inputs/
+    ├── video.py            ← Camera capture helper
+    └── audio.py            ← Microphone capture helper
+```
+
+---
+
 ## Configuration reference
 
 | Field | Default | Description |
@@ -342,32 +330,6 @@ detector.initialize()
 ```bash
 python3 training/reset_model.py   # factory reset — deletes outputs/ checkpoints
 ```
-
----
-
-## Missing-modality handling
-
-| Scenario | Behaviour |
-|---|---|
-| Both modalities | Full cross-attention fusion |
-| `video_frames=None` | Learned absent-video token substituted |
-| `audio=None` | Learned absent-audio token substituted |
-| Both `None` | `ValueError` raised |
-
----
-
-## Quantization
-
-```python
-# After initialize(), before streaming:
-detector.quantize("dynamic")   # returns INT8-quantized model internally
-                               # Platform: qnnpack (ARM/macOS), fbgemm (x86)
-```
-
-Expected gains on CPU:
-- **~2–3× throughput increase** for cross-attention layers
-- **~4× memory reduction** for linear weights
-- Negligible accuracy loss (< 0.5% on held-out emotion benchmarks)
 
 ---
 
