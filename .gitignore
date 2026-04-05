@@ -89,7 +89,6 @@ ipython_config.py
 
 # Model cache
 .cache/
-models/
 *.pt
 *.pth
 *.onnx
