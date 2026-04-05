@@ -21,7 +21,7 @@ Quick start::
 
     import numpy as np
     frames = np.random.randint(0, 255, (16, 480, 640, 3), dtype=np.uint8)
-    result = detector.process_frames(frames)
+    result = detector.process(frames)
     print(result.dominant_emotion)
     print(result.latent_embedding[:4])   # 512-dim VLA context vector
     print(result.metrics)                # stress, engagement, arousal

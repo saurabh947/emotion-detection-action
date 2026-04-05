@@ -124,7 +124,9 @@ source venv/bin/activate
 pip3 install -e ".[dev]"
 ```
 
-Core dependencies: `torch`, `torchaudio`, `transformers`, `pydantic>=2`, `numpy`, `opencv-python`, `mediapipe`, `funasr`, `modelscope`.
+Core dependencies: `torch`, `torchvision`, `transformers`, `pydantic>=2`, `numpy`, `opencv-python`, `mediapipe`, `funasr`, `modelscope`.
+
+> **Note:** `funasr` and `modelscope` are **required** — they load the default `emotion2vec` audio backbone.  If you swap the audio backbone to the legacy AST option, install the `legacy` extra instead: `pip install -e ".[legacy]"` (adds `torchaudio`).
 
 ---
 
@@ -147,9 +149,6 @@ python3 examples/neural_stream_demo.py --pretrained
 
 # INT8 quantization for low-latency deployment
 python3 examples/neural_stream_demo.py --quantize
-
-# Legacy VideoMAE + AST backbone
-python3 examples/neural_stream_demo.py --video-model videomae --audio-model ast --pretrained
 ```
 
 ### Real-time webcam demo (OpenCV visualisation)

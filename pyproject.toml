@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emotion-detection-action"
-version = "0.1.0"
+version = "0.2.0"
 description = "Human emotion detection SDK for robotics using Vision-Language-Action models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,7 +13,7 @@ authors = [
 ]
 keywords = ["emotion", "detection", "robotics", "vla", "vision", "language", "action"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -28,7 +28,6 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "torchaudio>=2.0.0",
     "transformers>=4.35.0",
     "numpy>=1.24.0",
     "opencv-python>=4.8.0",
@@ -38,8 +37,10 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiofiles>=23.0.0",
     "mediapipe>=0.10.0",
-    "funasr>=1.1.0",
-    "modelscope>=1.9.0",
+    # Required for the default audio backbone (emotion2vec via FunASR).
+    # These packages evolve fast — pin to tested minor versions.
+    "funasr>=1.1.0,<2.0.0",
+    "modelscope>=1.9.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,11 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+]
+# Legacy AST audio backbone requires torchaudio for mel-spectrogram computation.
+# Not needed when using the default emotion2vec backbone.
+legacy = [
+    "torchaudio>=2.0.0",
 ]
 vla = [
     "accelerate>=0.24.0",

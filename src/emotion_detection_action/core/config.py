@@ -69,17 +69,11 @@ class Config:
 
     Quick start::
 
-        # Best accuracy (AffectNet ViT + emotion2vec, requires funasr):
-        cfg = Config(two_tower_pretrained=True, two_tower_device="mps")
+        # Default: AffectNet ViT + emotion2vec (requires funasr + modelscope).
+        cfg = Config(two_tower_pretrained=True, two_tower_device="cuda")
 
-        # Legacy (VideoMAE + AST, no extra deps):
-        cfg = Config(
-            two_tower_video_model="videomae",
-            two_tower_video_backbone="MCG-NJU/videomae-base",
-            two_tower_audio_model="ast",
-            two_tower_audio_backbone="MIT/ast-finetuned-audioset-10-10-0.4593",
-            two_tower_face_crop_enabled=False,
-        )
+        # Stub weights only — no downloads, for architecture testing:
+        cfg = Config(two_tower_pretrained=False)
 
     Class-imbalance correction
     --------------------------
