@@ -346,6 +346,10 @@ class NeuralFusionModel(nn.Module):
 
         self.config = config
         d_model = config.d_model
+
+        # Temperature scalar for post-training calibration (default 1.0 = no-op).
+        # Set via load_temperature() after loading a calibrated checkpoint.
+        self.temperature: float = 1.0
         ffn_dim = ffn_dim or d_model * 4
 
         # --- Backbone towers ---
@@ -473,7 +477,9 @@ class NeuralFusionModel(nn.Module):
 
         # --- Task heads ---
         emotion_logits = self.emotion_head(fused)           # (B, 8)
-        emotion_probs = torch.softmax(emotion_logits, dim=-1)
+        # Apply temperature scaling if a calibrated checkpoint was loaded.
+        # T > 1 softens over-confident distributions; T=1.0 is a no-op.
+        emotion_probs = torch.softmax(emotion_logits / self.temperature, dim=-1)
         metrics = self.metrics_head(fused)                   # (B, 3)
 
         return NeuralModelOutput(

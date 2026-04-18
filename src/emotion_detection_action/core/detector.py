@@ -199,6 +199,13 @@ class EmotionDetector:
                     + (" (…)" if len(real_missing) > 5 else ""),
                     stacklevel=2,
                 )
+            # Apply temperature calibration if stored in the checkpoint.
+            if isinstance(payload, dict) and "temperature" in payload:
+                t = float(payload["temperature"])
+                self._model.temperature = t
+                if cfg.verbose:
+                    print(f"  Temperature calibration applied: T={t:.4f}")
+
             if cfg.verbose:
                 print(f"Loaded checkpoint: {cfg.two_tower_model_path}")
                 if missing:
